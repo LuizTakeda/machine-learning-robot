@@ -1,0 +1,86 @@
+#VRML_SIM R2025a utf8
+
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023a/projects/objects/backgrounds/protos/TexturedBackground.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023a/projects/objects/backgrounds/protos/TexturedBackgroundLight.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023a/projects/objects/floors/protos/RectangleArena.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023a/projects/robots/gctronic/e-puck/protos/E-puck.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023a/projects/appearances/protos/Parquetry.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/obstacles/protos/OilBarrel.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/factory/containers/protos/WoodenBox.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/factory/containers/protos/CardboardBox.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/apartment_structure/protos/Wall.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023a/projects/appearances/protos/BrushedAluminium.proto"
+
+WorldInfo {
+  info [
+    "The model of the E-puck robot"
+  ]
+  title "E-puck simulation"
+}
+Viewpoint {
+  orientation -0.5928276972139082 0.5876629134836383 0.5506429165366398 2.1423012317083994
+  position -0.10017912156053702 0.426604915838821 5.608896364086314
+  follow "e-puck"
+}
+TexturedBackground {
+}
+TexturedBackgroundLight {
+}
+RectangleArena {
+  floorSize 2.5 1.5
+  floorAppearance Parquetry {
+    type "light strip"
+  }
+  wallAppearance BrushedAluminium {
+    IBLStrength 30
+  }
+}
+DEF ROBOT E-puck {
+  translation -1.099999999999999 0.559999999999842 -6.396198718261296e-05
+  rotation 0.549981414355238 0.007225135183483124 -0.8351456407629704 4.440687883435861e-09
+  controller "<extern>"
+}
+DEF GOAL Solid {
+  translation 1.03 0 0.06
+  children [
+    Shape {
+      appearance Appearance {
+        material Material {
+          diffuseColor 1 0 0
+          emissiveColor 0.6 0 0
+        }
+      }
+      geometry Sphere {
+        radius 0.06
+      }
+    }
+  ]
+  boundingObject Sphere {
+    radius 0.06
+  }
+  locked TRUE
+}
+DEF BARREL OilBarrel {
+  translation 1.01 0.36 0.1
+  height 0.2
+  radius 0.08
+}
+DEF BOX CardboardBox {
+  translation -0.78 -0.6 0.075
+  size 0.15 0.15 0.15
+}
+DEF CUBE WoodenBox {
+  translation 0.07 0.62 0.075
+  size 0.15 0.15 0.15
+}
+DEF WALL1 Wall {
+  translation 0 -0.25 0
+  rotation 0 0 1 1.5708
+  size 0.02 1 0.1
+}
+DEF WALL2 Wall {
+  translation 0 0.25 0
+  rotation 0 0 1 1.5708
+  name "wall(5)"
+  size 0.02 1 0.1
+}
