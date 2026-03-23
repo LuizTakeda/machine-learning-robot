@@ -2,6 +2,9 @@
 distance senosors: 0 -> no light is detected, 4095 ->o maximum light is detected
 """
 import sys
+
+from networkx.classes import number_of_edges
+
 #sys.path.append(r'C:\Program Files\Webots\lib\controller\python') # add Webots controller library to the path
 from controller import Robot, Motor, Camera, DistanceSensor
 import os
@@ -52,7 +55,7 @@ pen.write(True)
 
 
 while robot.step(TIME_STEP) != -1:
-    print(f"[{robot.getTime():.2f}s] left={leftMotor.getVelocity():.2f} right={rightMotor.getVelocity():.2f}")
+    #print(f"[{robot.getTime():.2f}s] left={leftMotor.getVelocity():.2f} right={rightMotor.getVelocity():.2f}")
 
     # read sensor outputs
     proximity_sensor_values = []
@@ -90,9 +93,33 @@ while robot.step(TIME_STEP) != -1:
 
         # image construction
         image = np.frombuffer(raw_image, np.uint8).reshape((height, width, 4))
-        cv2.imshow("Pohled robota", image)
-        cv2.waitKey(1)  # Čeká 1 ms, což stačí na vykreslení okna
-        bgr_image = image[:, :, :3]
-        print(bgr_image)
+
+
+        BGR_image = image[:, :, :3]
+        imRed = BGR_image[:, :, 2]
+        imGreen = BGR_image[:, :, 1]
+        imBlue = BGR_image[:, :, 0]
+
+        [rows, columns, num_of_chanes] = BGR_image.shape[:3]
+
+        output_image = np.zeros((rows, columns), dtype=np.uint8)  # Create an empty output image
+
+        for row in range(rows):  # Loop over each row index
+            for column in range(columns):  # Loop over each column index
+                if imRed[row, column] > 130 and imGreen[row, column] < 80 and imBlue[row, column] < 80:  # Check if the pixel is red
+                    output_image[row, column] = 255  # Set the output pixel to white (255) if the condition is met, otherwise it remains black (0)
+
+        number_of_red_pixels = np.count_nonzero(output_image)
+        print(f"SEEING {number_of_red_pixels} RED pixels")
+
+
+        # view of robot
+        """
+        cv2.imshow("Robot view", image)
+        cv2.waitKey(1)  # wait 1 ms for window render
+        """
+        cv2.imshow("Robot view red", output_image)
+        cv2.waitKey(1)  # wait 1 ms for window render
+
 
     pass
