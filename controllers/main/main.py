@@ -2,17 +2,20 @@
 """
 distance senosors: 0 -> no light is detected, 4095 ->o maximum light is detected
 """
+import sys
+#sys.path.append(r'C:\Program Files\Webots\lib\controller\python') # add Webots controller library to the path
 from controller import Robot, Motor, Camera, DistanceSensor
-
+import os
+import math
+import numpy as np
 import gymnasium as gym
+from gymnasium import spaces
+from stable_baselines3 import PPO
+import cv2
 
-env = gym.make("CartPole-v1", render_mode="human")
-
-#constants
 TIME_STEP = 64
-MAX_SPEED = 6.24 * 4.0
+MAX_SPEED = 6.279
 
-#init
 robot = Robot()
 
 proximity_sensors = []
@@ -24,6 +27,7 @@ for index in range(8):
 
 camera = robot.getDevice('camera')
 camera.enable(TIME_STEP)
+#camera resolution can be set in camera_width and camera_height fields in webots
 
 #initialization of motors
 leftMotor = robot.getDevice('left wheel motor')
@@ -63,7 +67,6 @@ while robot.step(TIME_STEP) != -1:
                             or proximity_sensor_values[6] > 80.0
                             or proximity_sensor_values[7] > 80.0)
 
-    MAX_SPEED = 6.28
     left_speed = 0.5 * MAX_SPEED
     right_speed = 0.5 * MAX_SPEED
 
@@ -79,4 +82,17 @@ while robot.step(TIME_STEP) != -1:
 
     leftMotor.setVelocity(left_speed)
     rightMotor.setVelocity(right_speed)
+
+    raw_image = camera.getImage()
+    if raw_image:
+        # Webots sends format BGRA (Blue, Green, Red, Alpha)
+        width = camera.getWidth()
+        height = camera.getHeight()
+
+        # image construction
+        image = np.frombuffer(raw_image, np.uint8).reshape((height, width, 4))
+
+        cv2.imshow("Pohled robota", image)
+        cv2.waitKey(1)  # Čeká 1 ms, což stačí na vykreslení okna
+
     pass
