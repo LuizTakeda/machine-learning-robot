@@ -2,8 +2,7 @@
 """
 distance senosors: 0 -> no light is detected, 4095 ->o maximum light is detected
 """
-import sys
-sys.path.append(r'C:\Program Files\Webots\lib\controller\python') # add Webots controller library to the path
+
 from controller import Robot, Motor, Camera, DistanceSensor
 
 #constants
