@@ -1,4 +1,3 @@
-"""epuck_go_forward controller."""
 """
 distance senosors: 0 -> no light is detected, 4095 ->o maximum light is detected
 """
@@ -91,8 +90,9 @@ while robot.step(TIME_STEP) != -1:
 
         # image construction
         image = np.frombuffer(raw_image, np.uint8).reshape((height, width, 4))
-
         cv2.imshow("Pohled robota", image)
         cv2.waitKey(1)  # Čeká 1 ms, což stačí na vykreslení okna
+        bgr_image = image[:, :, :3]
+        print(bgr_image)
 
     pass
