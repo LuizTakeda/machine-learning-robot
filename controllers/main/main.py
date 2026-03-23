@@ -2,8 +2,11 @@
 """
 distance senosors: 0 -> no light is detected, 4095 ->o maximum light is detected
 """
-
 from controller import Robot, Motor, Camera, DistanceSensor
+
+import gymnasium as gym
+
+env = gym.make("CartPole-v1", render_mode="human")
 
 #constants
 TIME_STEP = 64
