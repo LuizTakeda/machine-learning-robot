@@ -2,9 +2,6 @@
 distance senosors: 0 -> no light is detected, 4095 ->o maximum light is detected
 """
 import sys
-
-from networkx.classes import number_of_edges
-
 #sys.path.append(r'C:\Program Files\Webots\lib\controller\python') # add Webots controller library to the path
 from controller import Robot, Motor, Camera, DistanceSensor
 import os
@@ -40,7 +37,7 @@ rightMotor.setPosition(float('inf'))
 
 # set up the motor speeds at 10% of the MAX_SPEED.
 leftMotor.setVelocity(0.15 * MAX_SPEED)
-rightMotor.setVelocity(0.1 * MAX_SPEED)
+rightMotor.setVelocity(0.15 * MAX_SPEED)
 
 """
 
@@ -54,10 +51,93 @@ pen.write(True)
 """
 
 
-while robot.step(TIME_STEP) != -1:
-    #print(f"[{robot.getTime():.2f}s] left={leftMotor.getVelocity():.2f} right={rightMotor.getVelocity():.2f}")
 
-    # read sensor outputs
+class MyEnv(gym.Env):
+    def __init__(self, render_mode=None):
+        super().__init__()
+
+        # 2 - left motor and right motor continuous speed control
+        self.action_space = spaces.Box(low=-MAX_SPEED, high=MAX_SPEED, shape=(2,), dtype=np.float32)
+
+        self.observation_space = spaces.Box(
+            low=0, high=np.inf, shape=(1,), dtype=np.float32
+        )
+
+        self.render_mode = render_mode
+        self.state = {"previous_red_pixels": 0.0, "current_red_pixels": 0.0}
+
+    def reset(self, seed=None, options=None):
+        super().reset(seed=seed)
+        robot.step(TIME_STEP)
+
+        leftMotor.setVelocity(0.0)
+        rightMotor.setVelocity(0.0)
+
+        self.state = {"previous_red_pixels": 0.0, "current_red_pixels": 0.0}
+        return np.array([0.0], dtype=np.float32), {}
+
+    def red_pixels_observed(self):
+        raw_image = camera.getImage()
+        if raw_image:
+            width = camera.getWidth()
+            height = camera.getHeight()
+            image = np.frombuffer(raw_image, np.uint8).reshape((height, width, 4))
+
+            BGR = image[:, :, :3]
+            # NumPy maska - faster than loop
+            mask = (BGR[:, :, 2] > 130) & (BGR[:, :, 1] < 80) & (BGR[:, :, 0] < 80)
+            count = float(np.count_nonzero(mask))
+
+            print(f"SEEING {count} RED pixels")
+            cv2.imshow("Robot view red", mask.astype(np.uint8) * 255)
+            cv2.waitKey(1)
+
+            # správný přístup ke slovníku
+            self.state["current_red_pixels"] = count
+
+
+    def step(self, action):
+        robot.step(TIME_STEP)
+        leftMotor.setVelocity(float(action[0]))
+        rightMotor.setVelocity(float(action[1]))
+
+        self.red_pixels_observed()
+
+        # odměna podle změny červených pixelů
+        if self.state["current_red_pixels"] > self.state["previous_red_pixels"]:
+            reward = 1   # robot got closer
+        else:
+            reward = -1  # robot got further
+
+        self.state["previous_red_pixels"] = self.state["current_red_pixels"]
+        observation = np.array([self.state["current_red_pixels"]], dtype=np.float32)
+
+        return observation, reward, False, False, {}
+
+    def close(self):
+        cv2.destroyAllWindows()
+
+
+
+
+environment = MyEnv()
+model = PPO("MlpPolicy", environment, verbose=1)
+model.learn(total_timesteps=50000)
+model.save("following_red_ball_model")
+
+
+
+
+"""
+while robot.step(TIME_STEP) != -1:
+    environment.step()
+
+    pass
+"""
+
+
+"""
+ # read sensor outputs
     proximity_sensor_values = []
     for index in range(8):
         proximity_sensor_values.append(proximity_sensors[index].getValue())
@@ -74,52 +154,11 @@ while robot.step(TIME_STEP) != -1:
 
     if left_obstacle:
         print("Left obstacle detected, turning right")
-        left_speed = 0.5 * MAX_SPEED
-        right_speed = -0.5 * MAX_SPEED
+        #left_speed = 0.5 * MAX_SPEED
+        #right_speed = -0.5 * MAX_SPEED
 
     if right_obstacle:
         print("Right obstacle detected, turning left")
-        left_speed = -0.5 * MAX_SPEED
-        right_speed = 0.5 * MAX_SPEED
-
-    leftMotor.setVelocity(left_speed)
-    rightMotor.setVelocity(right_speed)
-
-    raw_image = camera.getImage()
-    if raw_image:
-        # Webots sends format BGRA (Blue, Green, Red, Alpha)
-        width = camera.getWidth()
-        height = camera.getHeight()
-
-        # image construction
-        image = np.frombuffer(raw_image, np.uint8).reshape((height, width, 4))
-
-
-        BGR_image = image[:, :, :3]
-        imRed = BGR_image[:, :, 2]
-        imGreen = BGR_image[:, :, 1]
-        imBlue = BGR_image[:, :, 0]
-
-        [rows, columns, num_of_chanes] = BGR_image.shape[:3]
-
-        output_image = np.zeros((rows, columns), dtype=np.uint8)  # Create an empty output image
-
-        for row in range(rows):  # Loop over each row index
-            for column in range(columns):  # Loop over each column index
-                if imRed[row, column] > 130 and imGreen[row, column] < 80 and imBlue[row, column] < 80:  # Check if the pixel is red
-                    output_image[row, column] = 255  # Set the output pixel to white (255) if the condition is met, otherwise it remains black (0)
-
-        number_of_red_pixels = np.count_nonzero(output_image)
-        print(f"SEEING {number_of_red_pixels} RED pixels")
-
-
-        # view of robot
-        """
-        cv2.imshow("Robot view", image)
-        cv2.waitKey(1)  # wait 1 ms for window render
-        """
-        cv2.imshow("Robot view red", output_image)
-        cv2.waitKey(1)  # wait 1 ms for window render
-
-
-    pass
+        #left_speed = -0.5 * MAX_SPEED
+        #right_speed = 0.5 * MAX_SPEED
+"""
