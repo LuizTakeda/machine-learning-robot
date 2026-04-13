@@ -2,3 +2,4 @@ worlds
 .venv
 /.idea
 /worlds
+controllers/main/__pycache__/main.cpython-312.pyc
