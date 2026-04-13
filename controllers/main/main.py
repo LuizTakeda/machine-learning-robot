@@ -31,6 +31,7 @@ MAX_SPEED = 6.279                # max angular velocity of e-puck motors [rad/s]
 MAX_STEPS_PER_EPISODE = 3000     # max steps per episode
 RED_PIXEL_RATIO_GOAL = 0.95      # red pixel ratio threshold = robot is at the ball
 STEPS_WITHOUT_BALL_LIMIT = 100   # steps without seeing the ball before truncation
+FRAME_SKIP = 5
 
 # --- Robot starting pose (values from .wbt file) ---
 ROBOT_START_POSITION = [-1.1, 0.019, 0.0]   # [x, y, z] in meters
@@ -259,96 +260,63 @@ class RoombaRedBallEnv(gym.Env):
         return self._build_observation(), {}
 
     def step(self, action):
-        """
-        Execute one environment step.
-
-        1. Unpack action from the agent (linear and angular velocity)
-        2. Convert to motor speeds and apply
-        3. Advance simulation by one TIME_STEP
-        4. Analyze camera - detect the red ball
-        5. Compute reward
-        6. Check episode termination conditions
-        """
-        # Unpack action from the agent
         linear_velocity = float(action[0])
         angular_velocity = float(action[1])
 
-        # Convert linear/angular velocity to wheel speeds and set motors
         left_speed, right_speed = convert_velocities_to_motor_speeds(linear_velocity, angular_velocity)
         left_motor.setVelocity(left_speed)
         right_motor.setVelocity(right_speed)
 
-        # Advance simulation by one step
-        robot.step(TIME_STEP)
+        # *** ZMĚNA: stejná akce se opakuje FRAME_SKIP-krát ***
+        accumulated_reward = 0.0
+        terminated = False
 
-        # Save current velocities to state (will be part of the observation)
-        self.current_linear_velocity = linear_velocity
-        self.current_angular_velocity = angular_velocity
+        for _ in range(FRAME_SKIP):
+            robot.step(TIME_STEP)  # jeden simulační krok (64 ms)
 
-        # Analyze camera - find how many red pixels we see and where the ball is
-        self.previous_red_pixel_ratio = self.current_red_pixel_ratio
-        self.current_red_pixel_ratio, self.current_goal_position = analyze_camera_for_red_ball()
-        self.step_count += 1
+            self.current_linear_velocity = linear_velocity
+            self.current_angular_velocity = angular_velocity
 
-        # Track consecutive steps without seeing the ball
-        if self.current_red_pixel_ratio == 0.0:
-            self.steps_without_red_ball += 1
-        else:
-            self.steps_without_red_ball = 0
+            self.previous_red_pixel_ratio = self.current_red_pixel_ratio
+            self.current_red_pixel_ratio, self.current_goal_position = analyze_camera_for_red_ball()
+            self.step_count += 1
 
-        # =============================================
-        # REWARD COMPUTATION
-        # =============================================
-        reward = 0.0
+            if self.current_red_pixel_ratio == 0.0:
+                self.steps_without_red_ball += 1
+            else:
+                self.steps_without_red_ball = 0
 
-        # 1) Reward for ball size in the image
-        #    More red pixels = closer to the ball
-        #    Formula: reward += ratio * 2.0
-        #    Example: ratio 0.1 (10% of image) -> +0.2, ratio 0.5 -> +1.0
-        reward += self.current_red_pixel_ratio * 2.0
+            # reward se akumuluje přes všechny sub-kroky
+            reward = 0.0
+            pixel_ratio_change = self.current_red_pixel_ratio - self.previous_red_pixel_ratio
+            reward += pixel_ratio_change * 5.0
 
-        # 2) Reward for approaching (change in ratio vs previous step)
-        #    Positive change = getting closer, negative = moving away
-        #    Formula: reward += (current_ratio - previous_ratio) * 5.0
-        #    Example: ratio grew from 0.1 to 0.15 -> change +0.05 -> reward +0.25
-        #             ratio fell from 0.15 to 0.1  -> change -0.05 -> reward -0.25
-        pixel_ratio_change = self.current_red_pixel_ratio - self.previous_red_pixel_ratio
-        reward += pixel_ratio_change * 5.0
+            if self.current_red_pixel_ratio > 0.0:
+                reward += (1.0 - abs(self.current_goal_position)) * 1.0
+            else:
+                reward -= 0.5
 
-        # 3) Reward for centering the ball in the middle of the image
-        #    When we see the ball, we want it as close to center (position = 0) as possible.
-        #    Formula: centering = 1.0 - |position|, then reward += centering * 1.0
-        #    Example: position  0.0 (center)       -> centering 1.0 -> reward +1.0
-        #             position -0.5 (slightly left) -> centering 0.5 -> reward +0.5
-        #             position -1.0 (far left)      -> centering 0.0 -> reward +0.0
-        #    When we don't see the ball -> penalty -0.5
-        if self.current_red_pixel_ratio > 0.0:
-            centering_reward = 1.0 - abs(self.current_goal_position)
-            reward += centering_reward * 1.0
-        else:
-            reward -= 0.5
+            reached_goal = self.current_red_pixel_ratio >= RED_PIXEL_RATIO_GOAL
+            if reached_goal:
+                reward += 100.0
+                print(f"*** GOAL REACHED at step {self.step_count}! ***")
+                terminated = True
 
-        # 4) Large bonus for reaching the goal (ball fills almost the entire image)
-        #    If red pixel ratio >= RED_PIXEL_RATIO_GOAL -> bonus +100
-        reached_goal = self.current_red_pixel_ratio >= RED_PIXEL_RATIO_GOAL
-        if reached_goal:
-            reward += 100.0
-            print(f"*** GOAL REACHED at step {self.step_count}! ***")
+            accumulated_reward += reward
 
-        # =============================================
-        # EPISODE TERMINATION CONDITIONS
-        # =============================================
-        # terminated (reached_goal) = agent reached the goal (success)
-        # truncated = timeout or lost the ball for too long (failure)
+            # přerušit smyčku pokud jsme dosáhli cíle nebo ztratili míč
+            timed_out = self.step_count >= MAX_STEPS_PER_EPISODE
+            lost_ball = self.steps_without_red_ball >= STEPS_WITHOUT_BALL_LIMIT
+            if terminated or timed_out or lost_ball:
+                break
+
         timed_out = self.step_count >= MAX_STEPS_PER_EPISODE
         lost_ball = self.steps_without_red_ball >= STEPS_WITHOUT_BALL_LIMIT
         truncated = timed_out or lost_ball
 
-        # Accumulate reward for statistics
-        self.episode_total_reward += reward
+        self.episode_total_reward += accumulated_reward
         observation = self._build_observation()
 
-        # Log every 100 steps
         if self.step_count % 100 == 0:
             print(
                 f"  step {self.step_count}/{MAX_STEPS_PER_EPISODE}"
@@ -357,7 +325,7 @@ class RoombaRedBallEnv(gym.Env):
                 f" | ep reward: {self.episode_total_reward:.1f}"
             )
 
-        return observation, reward, reached_goal, truncated, {}
+        return observation, accumulated_reward, terminated, truncated, {}
 
     def close(self):
         """Clean up resources (OpenCV windows)."""
