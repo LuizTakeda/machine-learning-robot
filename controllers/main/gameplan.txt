@@ -1,0 +1,37 @@
+GAMEPLAN: Dotrénování modelu v prostředí s překážkami
+=======================================================
+
+Postup: curriculum learning (nejdřív jednoduchá úloha, pak složitější).
+Standardní a osvědčený přístup.
+
+CO BUDE FUNGOVAT DOBŘE
+----------------------
+- Politika už umí najít a přiblížit se k červené kouli -> tuhle dovednost si zachová.
+- SAC je off-policy, takže nový replay buffer sesbírá rychle nové zkušenosti s překážkami.
+- Ušetříš desítky tisíc kroků oproti učení od nuly.
+
+NA CO POZOR
+-----------
+
+1. OBSERVATION SPACE MUSÍ BÝT KONZISTENTNÍ
+   Pokud v obstacle fázi přidáš další senzory (např. boční proximity ps1, ps2, ps5, ps6
+   pro detekci překážek), model se nenačte - shape mismatch.
+   Buď už teď trénuj s plným observation vectorem (i když překážky nejsou), nebo to
+   budeš řešit převáděním vah ručně.
+   DOPORUČENÍ: už teď zahrnout všechny senzory, které budeš chtít v obstacle fázi.
+
+2. CATASTROPHIC FORGETTING
+   Pokud reward za vyhýbání se překážkám dominuje, agent může "zapomenout" chtít ke kouli.
+   Řešení: reward za vyhýbání drž jako penalizaci za kolizi, ne jako samostatný cíl.
+   Hlavní reward signál (přibližování ke kouli) nech stejný.
+
+3. NIŽŠÍ LEARNING RATE VE DRUHÉ FÁZI
+   Zvaž learning_rate=1e-4 místo 3e-4.
+   Už máš dobré váhy, nechceš je destabilizovat.
+
+4. NÁHODNÉ POZICE PŘEKÁŽEK
+   Mezi epizodami randomizovat rozložení, jinak se agent naučí jen jedno konkrétní uspořádání.
+
+5. REPLAY BUFFER Z PRVNÍ FÁZE
+   Otázka, jestli ho načítat. Pro obstacle fázi obsahuje zastaralá data (bez překážek).
+   DOPORUČENÍ: NENAČÍTAT a nechat SAC sesbírat čerstvá data v novém prostředí.

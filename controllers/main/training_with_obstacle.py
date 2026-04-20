@@ -226,8 +226,6 @@ class RoombaRedBallEnv(gym.Env):
         #   [2]  current linear velocity:  -MAX_SPEED to +MAX_SPEED
         #   [3]  current angular velocity: -MAX_SPEED to +MAX_SPEED
         #   [4-11] 8 proximity sensors ps0..ps7: 0.0 (nothing) to 1.0 (touching)
-        #       Full 360° physical distance signal - in obstacle phase the model
-        #       can learn to use side/rear sensors to avoid walls and obstacles.
         self.observation_space = spaces.Box(
             low=np.array(
                 [0.0, -1.0, -MAX_SPEED, -MAX_SPEED] + [0.0] * 8,
@@ -257,9 +255,7 @@ class RoombaRedBallEnv(gym.Env):
         self.episode_total_reward = 0.0        # cumulative reward in current episode
 
     def _build_observation(self):
-        """Build the observation vector from current environment state.
-        Output is 1D array of shape (12,) with values in the order:
-        """
+        """Build the observation vector from current environment state."""
         return np.concatenate([
             np.array([
                 self.current_red_pixel_ratio,
@@ -326,7 +322,7 @@ class RoombaRedBallEnv(gym.Env):
         terminated = False
 
         for _ in range(FRAME_SKIP):
-            robot.step(TIME_STEP) # 5 times per action to simulate 320ms of time per step
+            robot.step(TIME_STEP)
 
             self.current_linear_velocity = linear_velocity
             self.current_angular_velocity = angular_velocity
@@ -419,21 +415,33 @@ environment = RoombaRedBallEnv()
 
 from stable_baselines3 import SAC
 
-# SAC (Soft Actor-Critic) - off-policy algorithm suitable for continuous actions
-# MlpPolicy = multi-layer perceptron, default two hidden layers of 64 neurons each.
-# Increase learning_starts if the agent behaves randomly for too long at the start.
-model = SAC(
-    "MlpPolicy",
-    environment,
-    verbose=1,
-    learning_starts=1000,   # collect this many random steps before first update
-    batch_size=256,          # larger batch = more stable gradient updates
-    gamma=0.99,              # discount factor - values future rewards highly
-    learning_rate=3e-4,      # default SAC learning rate, works well in practice
-)
+PRETRAINED_MODEL_PATH = "following_red_ball_model.zip"
+REPLAY_BUFFER_PATH = "following_red_ball_replay_buffer.pkl"
 
-# 200 000 steps is a reasonable minimum for this task.
-# At FRAME_SKIP=5 and TIME_STEP=64ms, each agent step = 320ms of simulated time.
-model.learn(total_timesteps=70_000)
-model.save("following_red_ball_model")
-print("Model saved to following_red_ball_model.zip")
+import os
+
+if os.path.exists(PRETRAINED_MODEL_PATH):
+    print(f"Loading pretrained model from {PRETRAINED_MODEL_PATH}")
+    model = SAC.load(PRETRAINED_MODEL_PATH, env=environment, verbose=1)
+
+    if os.path.exists(REPLAY_BUFFER_PATH):
+        print(f"Loading replay buffer from {REPLAY_BUFFER_PATH}")
+        model.load_replay_buffer(REPLAY_BUFFER_PATH)
+else:
+    print("No pretrained model found, training from scratch")
+    model = SAC(
+        "MlpPolicy",
+        environment,
+        verbose=1,
+        learning_starts=1000,
+        batch_size=256,
+        gamma=0.99,
+        learning_rate=3e-4,
+    )
+
+# reset_num_timesteps=False keeps the step counter / LR schedule continuous
+# across training sessions when resuming from a checkpoint.
+model.learn(total_timesteps=200_000, reset_num_timesteps=False)
+model.save("obstacle_avoidance_following_red_ball_model")
+model.save_replay_buffer("obstacle_avoidance_following_red_ball_replay_buffer.pkl")
+print("Model saved to obstacle_avoidance_following_red_ball_model.zip")
