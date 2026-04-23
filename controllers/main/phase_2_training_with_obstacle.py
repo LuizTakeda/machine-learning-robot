@@ -36,11 +36,11 @@ TIME_STEP = 64                   # simulation step in milliseconds
 MAX_SPEED = 6.279                # max angular velocity of e-puck motors [rad/s]
 
 # --- Episode constants ---
-MAX_STEPS_PER_EPISODE = 3000     # max steps per episode
+MAX_STEPS_PER_EPISODE = 10000     # max steps per episode
 # Physical contact threshold: front proximity sensor value > 0.95 means the robot
 # is essentially touching the ball. Much more realistic than a 95% pixel ratio.
 PROXIMITY_GOAL_THRESHOLD = 0.95  # normalized proximity sensor value (0.0 - 1.0)
-STEPS_WITHOUT_BALL_LIMIT = 100   # steps without seeing the ball before truncation
+STEPS_WITHOUT_BALL_LIMIT = 6000   # steps without seeing the ball before truncation
 FRAME_SKIP = 5
 
 # --- Robot starting pose (values from .wbt file) ---
@@ -146,7 +146,10 @@ def analyze_camera_for_red_ball():
         red_pixel_ratio: ratio of red pixels (0.0 - 1.0)
         goal_horizontal_position: horizontal ball position (-1.0 to +1.0)
     """
-    raw_image = camera.getImage()
+    try:
+        raw_image = camera.getImage()
+    except ValueError:
+        return 0.0, 0.0
     if not raw_image:
         return 0.0, 0.0
 

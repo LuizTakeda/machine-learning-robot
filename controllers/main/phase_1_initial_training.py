@@ -148,7 +148,10 @@ def analyze_camera_for_red_ball():
         red_pixel_ratio: ratio of red pixels (0.0 - 1.0)
         goal_horizontal_position: horizontal ball position (-1.0 to +1.0)
     """
-    raw_image = camera.getImage()
+    try:
+        raw_image = camera.getImage()
+    except ValueError:
+        return 0.0, 0.0
     if not raw_image:
         return 0.0, 0.0
 
