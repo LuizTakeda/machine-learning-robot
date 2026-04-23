@@ -36,11 +36,11 @@ TIME_STEP = 64                   # simulation step in milliseconds
 MAX_SPEED = 6.279                # max angular velocity of e-puck motors [rad/s]
 
 # --- Episode constants ---
-MAX_STEPS_PER_EPISODE = 10000     # max steps per episode
+MAX_STEPS_PER_EPISODE = 5000     # max steps per episode
 # Physical contact threshold: front proximity sensor value > 0.95 means the robot
 # is essentially touching the ball. Much more realistic than a 95% pixel ratio.
 PROXIMITY_GOAL_THRESHOLD = 0.95  # normalized proximity sensor value (0.0 - 1.0)
-STEPS_WITHOUT_BALL_LIMIT = 6000   # steps without seeing the ball before truncation
+STEPS_WITHOUT_BALL_LIMIT = 300    # steps without seeing the ball before truncation
 FRAME_SKIP = 5
 
 # --- Robot starting pose (values from .wbt file) ---
@@ -92,6 +92,8 @@ right_motor.setVelocity(0.0)
 robot_node = robot.getFromDef('ROBOT')
 robot_translation_field = robot_node.getField('translation')
 robot_rotation_field = robot_node.getField('rotation')
+
+goal_node = robot.getFromDef('GOAL')
 
 # --- Robot dimensions ---
 # Distance between e-puck wheels - needed for converting
@@ -265,6 +267,7 @@ class RoombaRedBallEnv(gym.Env):
         self.episode_total_reward = 0.0        # cumulative reward in current episode
         self.steps_since_ball_in_front = 999   # steps since ball was visible and centered (999 = never)
         self.steps_since_ball_visible = 999    # steps since ball was visible at all (999 = never)
+        self.steps_near_ball = 0               # consecutive steps with ball visible but goal not reached
 
     def _build_observation(self):
         """Build the observation vector from current environment state."""
@@ -322,6 +325,7 @@ class RoombaRedBallEnv(gym.Env):
         self.episode_total_reward = 0.0
         self.steps_since_ball_in_front = 999
         self.steps_since_ball_visible = 999
+        self.steps_near_ball = 0
 
         return self._build_observation(), {}
 
@@ -359,13 +363,6 @@ class RoombaRedBallEnv(gym.Env):
             # --- Step penalty ---
             reward -= 0.05
 
-            # --- Visibility reward ---
-            reward += self.current_red_pixel_ratio * 3.0
-
-            # --- Delta reward ---
-            pixel_ratio_change = self.current_red_pixel_ratio - self.previous_red_pixel_ratio
-            reward += pixel_ratio_change * 10.0
-
             # Track ball visibility (two levels):
             #   ball_is_in_front  — visible AND centered (for centering delta)
             #   ball_recently_visible — seen at all recently (for goal condition)
@@ -392,35 +389,67 @@ class RoombaRedBallEnv(gym.Env):
             elif not ball_recently_visible:
                 reward -= 0.5
 
+            # --- Temporal penalty for lingering near the ball ---
+            # Counter only grows — never resets on brief ball loss — so stuck_orbit
+            # truncation is guaranteed to fire and the episode doesn't run to 5000 steps
+            # accumulating massive negatives that teach the robot to avoid the ball.
+            if self.current_red_pixel_ratio > 0.05:
+                self.steps_near_ball += 1
+
+            # --- Crash penalty ---
+            front_collision = self.current_front_proximity > 0.9 and not ball_recently_visible
+            side_collision  = np.max(self.current_proximities[[1, 2, 5, 6]]) > 0.9
+            if front_collision or side_collision:
+                reward -= 1.0
+
             # --- Goal: physical contact with the ball ---
-            reached_goal = self.current_front_proximity >= PROXIMITY_GOAL_THRESHOLD and ball_recently_visible
+            # Uses max of all 8 proximity sensors so contact is detected from any approach angle.
+            # Requires high red pixel ratio to avoid false positives when touching walls or obstacles.
+            # 0.10 red threshold (not 0.35) — side approaches at 7cm give ~0.22 red_px,
+            # which is real contact. Walls and obstacles always give red=0.000.
+            reached_goal = (
+                np.max(self.current_proximities) >= 0.22
+                and self.current_red_pixel_ratio >= 0.10
+                and ball_recently_visible
+            )
             if reached_goal:
-                reward += 100.0
+                reward += 1000.0
                 print(f"*** GOAL REACHED at step {self.step_count}! proximity={self.current_front_proximity:.3f} ***")
                 terminated = True
 
             accumulated_reward += reward
 
             # Break the frame-skip loop early if the episode ended
-            timed_out = self.step_count >= MAX_STEPS_PER_EPISODE
-            lost_ball = self.steps_without_red_ball >= STEPS_WITHOUT_BALL_LIMIT
-            if terminated or timed_out or lost_ball:
+            timed_out   = self.step_count >= MAX_STEPS_PER_EPISODE
+            lost_ball   = self.steps_without_red_ball >= STEPS_WITHOUT_BALL_LIMIT
+            stuck_orbit = self.steps_near_ball >= 500
+            if terminated or timed_out or lost_ball or stuck_orbit:
                 break
 
-        timed_out = self.step_count >= MAX_STEPS_PER_EPISODE
-        lost_ball = self.steps_without_red_ball >= STEPS_WITHOUT_BALL_LIMIT
-        truncated = timed_out or lost_ball
+        timed_out   = self.step_count >= MAX_STEPS_PER_EPISODE
+        lost_ball   = self.steps_without_red_ball >= STEPS_WITHOUT_BALL_LIMIT
+        stuck_orbit = self.steps_near_ball >= 500
+        truncated   = timed_out or lost_ball or stuck_orbit
 
         self.episode_total_reward += accumulated_reward
         observation = self._build_observation()
 
-        if self.step_count % 100 == 0:
+        if self.step_count % 50 == 0:
+            rp = robot_translation_field.getSFVec3f()
+            gp = goal_node.getField('translation').getSFVec3f()
+            dist = np.sqrt((rp[0]-gp[0])**2 + (rp[2]-gp[2])**2)
+            ps = self.current_proximities
             print(
-                f"  step {self.step_count}/{MAX_STEPS_PER_EPISODE}"
-                f" | red px: {self.current_red_pixel_ratio:.3f}"
-                f" | goal pos: {self.current_goal_position:+.2f}"
-                f" | proximity: {self.current_front_proximity:.3f}"
-                f" | ep reward: {self.episode_total_reward:.1f}"
+                f"  step {self.step_count:4d}"
+                f" | robot ({rp[0]:+.2f},{rp[2]:+.2f})"
+                f" | ball ({gp[0]:+.2f},{gp[2]:+.2f})"
+                f" | dist {dist:.3f}"
+                f" | red {self.current_red_pixel_ratio:.3f}"
+                f" | cam_x {self.current_goal_position:+.2f}"
+                f" | prox_max {np.max(ps):.3f}"
+                f" | ps [{ps[0]:.2f},{ps[1]:.2f},{ps[2]:.2f},{ps[3]:.2f},{ps[4]:.2f},{ps[5]:.2f},{ps[6]:.2f},{ps[7]:.2f}]"
+                f" | near_ball {self.steps_near_ball}"
+                f" | ep_rew {self.episode_total_reward:.1f}"
             )
 
         return observation, accumulated_reward, terminated, truncated, {}
@@ -462,10 +491,11 @@ if os.path.exists(PRETRAINED_MODEL_PATH):
         model.load_replay_buffer(REPLAY_BUFFER_PATH)
 else:
     print("No pretrained model found")
+    exit(-9)
 
 # reset_num_timesteps=False keeps the step counter / LR schedule continuous
 # across training sessions when resuming from a checkpoint.
-model.learn(total_timesteps=100_000, reset_num_timesteps=False)
+model.learn(total_timesteps=50_000, reset_num_timesteps=False)
 model.save("obstacle_avoidance_following_red_ball_model")
 model.save_replay_buffer("obstacle_avoidance_following_red_ball_replay_buffer.pkl")
 print("Model saved to obstacle_avoidance_following_red_ball_model.zip")
