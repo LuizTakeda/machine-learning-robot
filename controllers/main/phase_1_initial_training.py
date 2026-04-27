@@ -18,12 +18,20 @@ Reward:
     - Large bonus for reaching the goal (physical contact)
 """
 import sys
-sys.path.append(r'C:\Program Files\Webots\lib\controller\python')
+DESKTOP_SETUP = True
+
+if DESKTOP_SETUP == True:
+    sys.path.append(r'D:\Webots\lib\controller\python')
+else:
+    sys.path.append(r'C:\Program Files\Webots\lib\controller\python')
+
+
 from controller import Supervisor, Motor, Camera, DistanceSensor
 import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
 import cv2
+
 
 # --- Simulation constants ---
 TIME_STEP = 64                   # simulation step in milliseconds
@@ -140,7 +148,10 @@ def analyze_camera_for_red_ball():
         red_pixel_ratio: ratio of red pixels (0.0 - 1.0)
         goal_horizontal_position: horizontal ball position (-1.0 to +1.0)
     """
-    raw_image = camera.getImage()
+    try:
+        raw_image = camera.getImage()
+    except ValueError:
+        return 0.0, 0.0
     if not raw_image:
         return 0.0, 0.0
 
@@ -226,6 +237,8 @@ class RoombaRedBallEnv(gym.Env):
         #   [2]  current linear velocity:  -MAX_SPEED to +MAX_SPEED
         #   [3]  current angular velocity: -MAX_SPEED to +MAX_SPEED
         #   [4-11] 8 proximity sensors ps0..ps7: 0.0 (nothing) to 1.0 (touching)
+        #       Full 360° physical distance signal - in obstacle phase the model
+        #       can learn to use side/rear sensors to avoid walls and obstacles.
         self.observation_space = spaces.Box(
             low=np.array(
                 [0.0, -1.0, -MAX_SPEED, -MAX_SPEED] + [0.0] * 8,
@@ -243,6 +256,7 @@ class RoombaRedBallEnv(gym.Env):
         self.current_red_pixel_ratio = 0.0     # current red pixel ratio
         self.previous_red_pixel_ratio = 0.0    # previous step ratio (for computing delta)
         self.current_goal_position = 0.0       # horizontal ball position in the image
+        self.previous_goal_position = 0.0      # previous step position (for computing centering delta)
         self.current_linear_velocity = 0.0     # current linear velocity
         self.current_angular_velocity = 0.0    # current angular velocity
         self.current_front_proximity = 0.0     # normalized front proximity (ps0+ps7 mean, used for reward)
@@ -253,9 +267,13 @@ class RoombaRedBallEnv(gym.Env):
         self.steps_without_red_ball = 0        # consecutive steps without seeing the ball
         self.episode_count = 0                 # episode number
         self.episode_total_reward = 0.0        # cumulative reward in current episode
+        self.steps_since_ball_in_front = 999   # steps since ball was visible and centered (999 = never)
+        self.steps_since_ball_visible = 999    # steps since ball was visible at all (999 = never)
 
     def _build_observation(self):
-        """Build the observation vector from current environment state."""
+        """Build the observation vector from current environment state.
+        Output is 1D array of shape (12,) with values in the order:
+        """
         return np.concatenate([
             np.array([
                 self.current_red_pixel_ratio,
@@ -300,6 +318,7 @@ class RoombaRedBallEnv(gym.Env):
         self.current_red_pixel_ratio = 0.0
         self.previous_red_pixel_ratio = 0.0
         self.current_goal_position = 0.0
+        self.previous_goal_position = 0.0
         self.current_linear_velocity = 0.0
         self.current_angular_velocity = 0.0
         self.current_front_proximity = 0.0
@@ -307,6 +326,8 @@ class RoombaRedBallEnv(gym.Env):
         self.step_count = 0
         self.steps_without_red_ball = 0
         self.episode_total_reward = 0.0
+        self.steps_since_ball_in_front = 999
+        self.steps_since_ball_visible = 999
 
         return self._build_observation(), {}
 
@@ -322,12 +343,13 @@ class RoombaRedBallEnv(gym.Env):
         terminated = False
 
         for _ in range(FRAME_SKIP):
-            robot.step(TIME_STEP)
+            robot.step(TIME_STEP) # 5 times per action to simulate 320ms of time per step
 
             self.current_linear_velocity = linear_velocity
             self.current_angular_velocity = angular_velocity
 
             self.previous_red_pixel_ratio = self.current_red_pixel_ratio
+            self.previous_goal_position = self.current_goal_position
             self.current_red_pixel_ratio, self.current_goal_position = analyze_camera_for_red_ball()
             self.current_front_proximity = get_front_proximity()
             self.current_proximities = get_all_proximities()
@@ -341,37 +363,57 @@ class RoombaRedBallEnv(gym.Env):
             reward = 0.0
 
             # --- Step penalty ---
-            # Forces the agent to be active. A stationary robot always loses
-            # a small amount of reward each step, so standing still is never optimal.
             reward -= 0.05
 
+            # --- Visibility reward ---
+            # Small absolute reward for seeing the ball — gives gradient for exploration.
+            # At start position red_px ~ 0.004, so reward ~ 0.012, well below step penalty.
+            reward += self.current_red_pixel_ratio * 3.0
+
             # --- Delta reward ---
-            # Only rewards getting CLOSER to the ball (positive delta),
-            # penalizes moving away (negative delta).
-            # Does NOT reward just looking at the ball from a fixed position.
+            # Rewards getting CLOSER to the ball, penalizes moving away.
             pixel_ratio_change = self.current_red_pixel_ratio - self.previous_red_pixel_ratio
             reward += pixel_ratio_change * 10.0
 
-            # --- Centering bonus ---
-            # Gentle nudge to keep the ball in the center of the frame.
-            # Kept small so it doesn't dominate over the approach reward.
-            if self.current_red_pixel_ratio > 0.0:
-                reward += (1.0 - abs(self.current_goal_position)) * 0.3
+            # Track ball visibility (two levels):
+            #   ball_is_in_front  — visible AND centered (for centering delta)
+            #   ball_recently_visible — seen at all recently (for goal condition)
+            ball_is_in_front = (
+                self.current_red_pixel_ratio > 0.1
+                and abs(self.current_goal_position) < 0.3
+            )
+            if ball_is_in_front:
+                self.steps_since_ball_in_front = 0
             else:
-                # Penalty for losing the ball completely
+                self.steps_since_ball_in_front += 1
+
+            if self.current_red_pixel_ratio > 0.01:
+                self.steps_since_ball_visible = 0
+            else:
+                self.steps_since_ball_visible += 1
+
+            likely_near_ball = self.steps_since_ball_in_front <= 5
+            ball_recently_visible = self.steps_since_ball_visible <= 30
+
+            # --- Centering bonus ---
+            # Delta-based: rewards improvement in centering, not absolute position.
+            if self.current_red_pixel_ratio > 0.0:
+                centering_improvement = abs(self.previous_goal_position) - abs(self.current_goal_position)
+                reward += centering_improvement * 2.0
+            elif not ball_recently_visible:
                 reward -= 0.5
 
-            # --- Proximity bonus ---
-            # The front sensor gives the agent a direct physical distance signal.
-            # Only counts when the ball is actually visible (to avoid rewarding
-            # proximity to walls or other obstacles).
-            if self.current_red_pixel_ratio > 0.3:
-                reward += self.current_front_proximity * 5.0
-
             # --- Goal: physical contact with the ball ---
-            # Triggered when the front sensor reads > 95% (robot touching the ball).
-            # Much more realistic than requiring 95% red pixels in the image.
-            reached_goal = self.current_front_proximity >= PROXIMITY_GOAL_THRESHOLD
+            reached_goal = self.current_front_proximity >= PROXIMITY_GOAL_THRESHOLD and ball_recently_visible
+            if self.current_front_proximity > 0.5:
+                print(
+                    f"  [GOAL DEBUG] step={self.step_count}"
+                    f" proximity={self.current_front_proximity:.3f}"
+                    f" red_px={self.current_red_pixel_ratio:.4f}"
+                    f" steps_since_visible={self.steps_since_ball_visible}"
+                    f" ball_recently_visible={ball_recently_visible}"
+                    f" reached_goal={reached_goal}"
+                )
             if reached_goal:
                 reward += 100.0
                 print(f"*** GOAL REACHED at step {self.step_count}! proximity={self.current_front_proximity:.3f} ***")
@@ -394,6 +436,7 @@ class RoombaRedBallEnv(gym.Env):
 
         if self.step_count % 100 == 0:
             print(
+                f"red pixels visible:"
                 f"  step {self.step_count}/{MAX_STEPS_PER_EPISODE}"
                 f" | red px: {self.current_red_pixel_ratio:.3f}"
                 f" | goal pos: {self.current_goal_position:+.2f}"
@@ -415,33 +458,37 @@ environment = RoombaRedBallEnv()
 
 from stable_baselines3 import SAC
 
-PRETRAINED_MODEL_PATH = "following_red_ball_model.zip"
-REPLAY_BUFFER_PATH = "following_red_ball_replay_buffer.pkl"
+# SAC (Soft Actor-Critic) - off-policy algorithm suitable for continuous actions
+# MlpPolicy = multi-layer perceptron, default two hidden layers of 64 neurons each.
+# Increase learning_starts if the agent behaves randomly for too long at the start.
+if DESKTOP_SETUP == True:
+    import torch
+    print("Je CUDA dostupná? : ", torch.cuda.is_available())
+    print("Název GPU: ", torch.cuda.get_device_name(0) if torch.cuda.is_available() else "Žádné")
+    model = SAC(
+        "MlpPolicy",
+        environment,
+        device="cuda",  # TRAINING ON CUDA CORES
+        verbose=1,
+        learning_starts=1000,
+        batch_size=256,
+        gamma=0.99, # 0 - 1, how much the agent cares about future rewards vs immediate rewards, higher num-> prefers future reward
+        learning_rate=3e-4,
+    )
 
-import os
-
-if os.path.exists(PRETRAINED_MODEL_PATH):
-    print(f"Loading pretrained model from {PRETRAINED_MODEL_PATH}")
-    model = SAC.load(PRETRAINED_MODEL_PATH, env=environment, verbose=1)
-
-    if os.path.exists(REPLAY_BUFFER_PATH):
-        print(f"Loading replay buffer from {REPLAY_BUFFER_PATH}")
-        model.load_replay_buffer(REPLAY_BUFFER_PATH)
 else:
-    print("No pretrained model found, training from scratch")
     model = SAC(
         "MlpPolicy",
         environment,
         verbose=1,
-        learning_starts=1000,
-        batch_size=256,
-        gamma=0.99,
-        learning_rate=3e-4,
+        learning_starts=1000,   # collect this many random steps before first update
+        batch_size=256,          # larger batch = more stable gradient updates
+        gamma=0.99,              # discount factor - values future rewards highly
+        learning_rate=3e-4,      # default SAC learning rate, works well in practice
     )
 
-# reset_num_timesteps=False keeps the step counter / LR schedule continuous
-# across training sessions when resuming from a checkpoint.
-model.learn(total_timesteps=200_000, reset_num_timesteps=False)
-model.save("obstacle_avoidance_following_red_ball_model")
-model.save_replay_buffer("obstacle_avoidance_following_red_ball_replay_buffer.pkl")
-print("Model saved to obstacle_avoidance_following_red_ball_model.zip")
+# 200 000 steps is a reasonable minimum for this task.
+# At FRAME_SKIP=5 and TIME_STEP=64ms, each agent step = 320ms of simulated time.
+model.learn(total_timesteps=70_000)
+model.save("following_red_ball_model")
+print("Model saved to following_red_ball_model.zip")
