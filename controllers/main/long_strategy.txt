@@ -2,10 +2,6 @@
 OPTIMAL TRAINING STRATEGY FOR E-PUCK ROBOT NAVIGATION
 ================================================================================
 
---------------------------------------------------------------------------------
-ENGLISH VERSION
---------------------------------------------------------------------------------
-
 GOAL: Train an e-puck robot in Webots to navigate unknown environments,
       find a red ball, and reach it reliably.
 
@@ -16,6 +12,8 @@ gradually — skipping phases leads to a significantly worse final policy.
 
   Phase 1 (current): Empty arena, robot starts at fixed position facing the ball.
   Phase 2:           1-2 static obstacles placed between robot and ball.
+    2.1:
+    2.2:
   Phase 3:           Randomized obstacle positions AND ball position each episode.
   Phase 4:           Dense environment, more obstacles, robot start also randomized.
 

@@ -122,9 +122,9 @@ def convert_velocities_to_motor_speeds(linear_velocity, angular_velocity):
     left_speed = linear_velocity - angular_velocity * WHEEL_DISTANCE / 2.0
     right_speed = linear_velocity + angular_velocity * WHEEL_DISTANCE / 2.0
 
-    # Clamp to max motor speed
-    left_speed = np.clip(left_speed, -MAX_SPEED, MAX_SPEED)
-    right_speed = np.clip(right_speed, -MAX_SPEED, MAX_SPEED)
+    # Clamp to max motor speed (no reverse)
+    left_speed = np.clip(left_speed, 0, MAX_SPEED)
+    right_speed = np.clip(right_speed, 0, MAX_SPEED)
     return left_speed, right_speed
 
 
@@ -225,23 +225,31 @@ class RoombaRedBallEnv(gym.Env):
         super().__init__()
 
         # Action space: agent controls linear and angular velocity
-        # Both in range [-MAX_SPEED, +MAX_SPEED]
+        # linear_velocity: [0, MAX_SPEED] (no reverse), angular_velocity: [-MAX_SPEED, +MAX_SPEED]
         self.action_space = spaces.Box(
-            low=np.array([-MAX_SPEED, -MAX_SPEED], dtype=np.float32),
+            low=np.array([0, -MAX_SPEED], dtype=np.float32),
             high=np.array([MAX_SPEED, MAX_SPEED], dtype=np.float32),
         )
 
         # Observation space: 12 values the agent "sees"
         #   [0]  red pixel ratio:          0.0 (none) to 1.0 (full image)
         #   [1]  goal horizontal position: -1.0 (left) to +1.0 (right)
-        #   [2]  current linear velocity:  -MAX_SPEED to +MAX_SPEED
+        #   [2]  current linear velocity:  0.0 to +MAX_SPEED
         #   [3]  current angular velocity: -MAX_SPEED to +MAX_SPEED
         #   [4-11] 8 proximity sensors ps0..ps7: 0.0 (nothing) to 1.0 (touching)
         #       Full 360° physical distance signal - in obstacle phase the model
         #       can learn to use side/rear sensors to avoid walls and obstacles.
+        # Defines the valid range for each value in the observation vector.
+        # The RL algorithm uses these bounds to normalize inputs — they must match reality
+        # exactly, otherwise the algorithm expects values that never occur.
+        #   low/high[0]  red_pixel_ratio:           0.0 (no red) .. 1.0 (full image red)
+        #   low/high[1]  goal_horizontal_position: -1.0 (ball left edge) .. +1.0 (ball right edge)
+        #   low/high[2]  linear_velocity:           0.0 (stopped) .. MAX_SPEED (full forward)
+        #   low/high[3]  angular_velocity:         -MAX_SPEED (full right) .. +MAX_SPEED (full left)
+        #   low/high[4-11] proximity sensors ps0..ps7: 0.0 (nothing) .. 1.0 (touching)
         self.observation_space = spaces.Box(
             low=np.array(
-                [0.0, -1.0, -MAX_SPEED, -MAX_SPEED] + [0.0] * 8,
+                [0.0, -1.0, 0.0, -MAX_SPEED] + [0.0] * 8,
                 dtype=np.float32,
             ),
             high=np.array(
