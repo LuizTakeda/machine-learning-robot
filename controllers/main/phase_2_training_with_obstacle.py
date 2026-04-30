@@ -270,6 +270,7 @@ class RoombaRedBallEnv(gym.Env):
         self.steps_since_ball_in_front = 999   # steps since ball was visible and centered (999 = never)
         self.steps_since_ball_visible = 999    # steps since ball was visible at all (999 = never)
         self.steps_near_ball = 0               # consecutive steps with ball visible but goal not reached
+        self.steps_touching_wall = 0           # consecutive steps in contact with a wall (not the ball)
 
     def _build_observation(self):
         """Build the observation vector from current environment state."""
@@ -328,6 +329,7 @@ class RoombaRedBallEnv(gym.Env):
         self.steps_since_ball_in_front = 999
         self.steps_since_ball_visible = 999
         self.steps_near_ball = 0
+        self.steps_touching_wall = 0
 
         return self._build_observation(), {}
 
@@ -365,6 +367,15 @@ class RoombaRedBallEnv(gym.Env):
             # --- Step penalty ---
             reward -= 0.05
 
+            # --- Visibility reward ---
+            # Small absolute reward for seeing the ball — gives gradient for exploration.
+            reward += self.current_red_pixel_ratio * 3.0
+
+            # --- Delta reward ---
+            # Rewards getting CLOSER to the ball, penalizes moving away.
+            pixel_ratio_change = self.current_red_pixel_ratio - self.previous_red_pixel_ratio
+            reward += pixel_ratio_change * 10.0
+
             # Track ball visibility (two levels):
             #   ball_is_in_front  — visible AND centered (for centering delta)
             #   ball_recently_visible — seen at all recently (for goal condition)
@@ -392,29 +403,49 @@ class RoombaRedBallEnv(gym.Env):
                 reward -= 0.5
 
             # --- Temporal penalty for lingering near the ball ---
-            # Counter only grows — never resets on brief ball loss — so stuck_orbit
-            # truncation is guaranteed to fire and the episode doesn't run to 5000 steps
-            # accumulating massive negatives that teach the robot to avoid the ball.
-            if self.current_red_pixel_ratio > 0.05:
+            # Counter resets on real progress (red area growing OR centering improving),
+            # so the truncation fires only on genuine orbiting/stalling near the ball.
+            making_progress = (
+                pixel_ratio_change > 0.001
+                or (abs(self.previous_goal_position) - abs(self.current_goal_position)) > 0.01
+            )
+            if self.current_red_pixel_ratio > 0.05 and not making_progress:
                 self.steps_near_ball += 1
+            elif making_progress:
+                self.steps_near_ball = 0
 
-            # --- Crash penalty ---
-            front_collision = self.current_front_proximity > 0.9 and not ball_recently_visible
-            side_collision  = np.max(self.current_proximities[[1, 2, 5, 6]]) > 0.9
-            if front_collision or side_collision:
-                reward -= 1.0
-
-            # --- Goal: physical contact with the ball ---
-            # Uses max of all 8 proximity sensors so contact is detected from any approach angle.
-            # Requires high red pixel ratio to avoid false positives when touching walls or obstacles.
-            # 0.10 red threshold (not 0.35) — side approaches at 7cm give ~0.22 red_px,
-            # which is real contact. Walls and obstacles always give red=0.000.
-            reached_goal = (
-                np.max(self.current_proximities) >= 0.22
+            # --- Contact disambiguation ---
+            # The discriminator between "touching ball" and "touching wall" is red_pixel_ratio,
+            # NOT ball_recently_visible. Robot pressed against a wall while seeing the ball
+            # at distance has ball_recently_visible=True but red_pixel_ratio is small.
+            sensor_max = np.max(self.current_proximities)
+            in_contact = sensor_max > 0.9
+            touching_ball = (
+                in_contact
                 and self.current_red_pixel_ratio >= 0.10
                 and ball_recently_visible
             )
-            if reached_goal:
+            touching_wall = in_contact and not touching_ball
+
+            # --- Smooth wall avoidance gradient ---
+            # When the ball is NOT the dominant thing the sensors see (red small),
+            # any proximity reading means a wall. A small continuous penalty proportional
+            # to the highest reading gives the agent a learnable gradient before contact.
+            # Disabled near the ball (red >= 0.05) so close approach is not punished.
+            if self.current_red_pixel_ratio < 0.05:
+                reward -= sensor_max * 0.3
+
+            # --- Wall crash penalty ---
+            # Stronger penalty than before (-2.0) so the gradient outweighs the
+            # +red*3 visibility reward when robot is pressed against a wall while seeing the ball.
+            if touching_wall:
+                reward -= 2.0
+                self.steps_touching_wall += 1
+            else:
+                self.steps_touching_wall = 0
+
+            # --- Goal: physical contact with the ball ---
+            if touching_ball:
                 reward += 1000.0
                 print(f"*** GOAL REACHED at step {self.step_count}! proximity={self.current_front_proximity:.3f} ***")
                 terminated = True
@@ -425,13 +456,15 @@ class RoombaRedBallEnv(gym.Env):
             timed_out   = self.step_count >= MAX_STEPS_PER_EPISODE
             lost_ball   = self.steps_without_red_ball >= STEPS_WITHOUT_BALL_LIMIT
             stuck_orbit = self.steps_near_ball >= 500
-            if terminated or timed_out or lost_ball or stuck_orbit:
+            stuck_wall  = self.steps_touching_wall >= 50
+            if terminated or timed_out or lost_ball or stuck_orbit or stuck_wall:
                 break
 
         timed_out   = self.step_count >= MAX_STEPS_PER_EPISODE
         lost_ball   = self.steps_without_red_ball >= STEPS_WITHOUT_BALL_LIMIT
         stuck_orbit = self.steps_near_ball >= 500
-        truncated   = timed_out or lost_ball or stuck_orbit
+        stuck_wall  = self.steps_touching_wall >= 50
+        truncated   = timed_out or lost_ball or stuck_orbit or stuck_wall
 
         self.episode_total_reward += accumulated_reward
         observation = self._build_observation()
@@ -451,6 +484,7 @@ class RoombaRedBallEnv(gym.Env):
                 f" | prox_max {np.max(ps):.3f}"
                 f" | ps [{ps[0]:.2f},{ps[1]:.2f},{ps[2]:.2f},{ps[3]:.2f},{ps[4]:.2f},{ps[5]:.2f},{ps[6]:.2f},{ps[7]:.2f}]"
                 f" | near_ball {self.steps_near_ball}"
+                f" | wall {self.steps_touching_wall}"
                 f" | ep_rew {self.episode_total_reward:.1f}"
             )
 
@@ -480,7 +514,7 @@ if os.path.exists(PRETRAINED_MODEL_PATH):
         env=environment,
         verbose=1,
         device="cuda",
-        learning_starts=0,
+        learning_starts=1000,
         custom_objects={
             "learning_rate": 1e-4,
             "batch_size": 256,
