@@ -10,7 +10,7 @@ from controller import Supervisor
 import numpy as np
 from stable_baselines3 import SAC
 
-MODEL_PATH = "obstacle_avoidance_following_red_ball_model"
+MODEL_PATH = "following_red_ball_model"
 
 TIME_STEP = 64
 MAX_SPEED = 6.279

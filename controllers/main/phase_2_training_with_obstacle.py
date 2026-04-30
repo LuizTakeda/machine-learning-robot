@@ -36,11 +36,11 @@ TIME_STEP = 64                   # simulation step in milliseconds
 MAX_SPEED = 6.279                # max angular velocity of e-puck motors [rad/s]
 
 # --- Episode constants ---
-MAX_STEPS_PER_EPISODE = 5000     # max steps per episode
+MAX_STEPS_PER_EPISODE = 10000     # max steps per episode
 # Physical contact threshold: front proximity sensor value > 0.95 means the robot
 # is essentially touching the ball. Much more realistic than a 95% pixel ratio.
 PROXIMITY_GOAL_THRESHOLD = 0.95  # normalized proximity sensor value (0.0 - 1.0)
-STEPS_WITHOUT_BALL_LIMIT = 300    # steps without seeing the ball before truncation
+STEPS_WITHOUT_BALL_LIMIT = 6000    # steps without seeing the ball before truncation
 FRAME_SKIP = 5
 
 # --- Robot starting pose (values from .wbt file) ---
@@ -491,13 +491,14 @@ if os.path.exists(PRETRAINED_MODEL_PATH):
     if os.path.exists(REPLAY_BUFFER_PATH):
         print(f"Loading replay buffer from {REPLAY_BUFFER_PATH}")
         model.load_replay_buffer(REPLAY_BUFFER_PATH)
+    # reset_num_timesteps=False keeps the step counter / LR schedule continuous
+    # across training sessions when resuming from a checkpoint.
+    model.learn(total_timesteps=300_000, reset_num_timesteps=False)
+    model.save("obstacle_avoidance_following_red_ball_model")
+    model.save_replay_buffer("obstacle_avoidance_following_red_ball_replay_buffer.pkl")
+    print("Model saved to obstacle_avoidance_following_red_ball_model.zip")
+
 else:
     print("No pretrained model found")
     exit(-9)
 
-# reset_num_timesteps=False keeps the step counter / LR schedule continuous
-# across training sessions when resuming from a checkpoint.
-model.learn(total_timesteps=50_000, reset_num_timesteps=False)
-model.save("obstacle_avoidance_following_red_ball_model")
-model.save_replay_buffer("obstacle_avoidance_following_red_ball_replay_buffer.pkl")
-print("Model saved to obstacle_avoidance_following_red_ball_model.zip")

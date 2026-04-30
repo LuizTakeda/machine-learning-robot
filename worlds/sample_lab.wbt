@@ -6,7 +6,6 @@ EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023a/project
 EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023a/projects/robots/gctronic/e-puck/protos/E-puck.proto"
 EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023a/projects/appearances/protos/Parquetry.proto"
 EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/factory/containers/protos/WoodenBox.proto"
-EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/factory/containers/protos/CardboardBox.proto"
 EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/apartment_structure/protos/Wall.proto"
 EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023a/projects/appearances/protos/BrushedAluminium.proto"
 
@@ -17,8 +16,8 @@ WorldInfo {
   title "E-puck simulation"
 }
 Viewpoint {
-  orientation -0.3059728804796847 0.4074165530596493 0.8604605445364468 1.4351712235034664
-  position -1.3871387824944508 -4.153245181065275 3.5196734254117628
+  orientation 0.02383232911731603 -0.9984723730830181 -0.04984917530722302 5.389945269711999
+  position -2.7504781105696585 -0.015980926303612364 3.5835000892152196
   follow "e-puck"
 }
 TexturedBackground {
@@ -35,12 +34,8 @@ RectangleArena {
   }
 }
 DEF ROBOT E-puck {
-  hidden position_0_0 0.12054745139160258
-  hidden position_0_1 0.0803681638151658
-  hidden rotation_1 0 1 0 0.12054745139160242
-  hidden rotation_2 0 1 0 0.08036816381516333
-  translation -1.05787 0.0369272 -0.00448787
-  rotation -0.0018383299374155346 -0.25267127164694664 -0.9675504374591313 0.014591168043999504
+  translation -0.839927 0.0242603 0.00467416
+  rotation -0.13350004132414323 -0.32651610107111567 -0.9357162896454081 0.171991
   controller "<extern>"
   supervisor TRUE
 }
@@ -64,12 +59,23 @@ DEF GOAL Solid {
   }
   locked TRUE
 }
-DEF BOX CardboardBox {
-  translation -0.78 -0.93 0.075
+DEF CUBE WoodenBox {
+  translation -0.54 0.91 0.075
   size 0.15 0.15 0.15
 }
 DEF CUBE WoodenBox {
-  translation 0.07 0.99 0.075
+  translation -0.09 1.05 0.075
+  name "wooden box(3)"
+  size 0.15 0.15 0.15
+}
+DEF CUBE WoodenBox {
+  translation -0.09 -1.18 0.075
+  name "wooden box(5)"
+  size 0.15 0.15 0.15
+}
+DEF CUBE WoodenBox {
+  translation -0.54 -0.89 0.075
+  name "wooden box(1)"
   size 0.15 0.15 0.15
 }
 DEF WALL1 Wall {
