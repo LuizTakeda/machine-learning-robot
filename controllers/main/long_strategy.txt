@@ -1,0 +1,167 @@
+================================================================================
+OPTIMAL TRAINING STRATEGY FOR E-PUCK ROBOT NAVIGATION
+================================================================================
+
+GOAL: Train an e-puck robot in Webots to navigate unknown environments,
+      find a red ball, and reach it reliably.
+
+--- 1. CURRICULUM LEARNING (most important) ---
+
+The strongest approach validated in Webots environments. Increase difficulty
+gradually — skipping phases leads to a significantly worse final policy.
+
+  Phase 1 (current): Empty arena, robot starts at fixed position facing the ball.
+  Phase 2:           1-2 static obstacles placed between robot and ball.
+    2.1:
+    2.2:
+  Phase 3:           Randomized obstacle positions AND ball position each episode.
+  Phase 4:           Dense environment, more obstacles, robot start also randomized.
+
+--- 2. REWARD FUNCTION ---
+
+Recommended structure from literature:
+
+  reward = goal_bonus + step_penalty + crash_penalty + distance_potential
+
+  goal_bonus:         +100 when robot physically touches the ball
+  step_penalty:       -0.05 per simulation step (forces movement)
+  crash_penalty:      -1 to -5 per collision with obstacle/wall
+                      WARNING: too large crash penalty causes divergence —
+                      robot learns to stand still instead of navigate
+  distance_potential: reward proportional to reduction in distance to goal
+                      (your red pixel delta reward approximates this correctly)
+
+--- 3. ALGORITHM CHOICE ---
+
+For continuous action spaces and high-dimensional observations:
+
+  SAC  > TD3 > PPO
+
+  SAC advantages:
+  - Entropy regularization naturally encourages exploration
+  - Off-policy = sample efficient
+  - Best stability of the three
+
+  PPO requires significantly more training steps for navigation tasks.
+  You are already using SAC — correct choice.
+
+--- 4. OBSERVATION SPACE ---
+
+Your current setup (camera + 8 proximity sensors) matches best-practice:
+  - Camera: goal localization (red pixel position, ratio)
+  - Proximity sensors: lighting-invariant obstacle awareness
+
+Multimodal sensor fusion consistently outperforms camera-only in navigation.
+
+--- 5. HINDSIGHT EXPERIENCE REPLAY (HER) ---
+
+If training stagnates, HER relabels failed episodes as successes toward
+intermediate goals, converting failures into useful learning signal.
+
+  from stable_baselines3 import HerReplayBuffer
+  model = SAC("MlpPolicy", env, replay_buffer_class=HerReplayBuffer, ...)
+
+Requires goal-conditioned environment (GoalEnv interface) — moderate refactor.
+Worth implementing if curriculum alone is not sufficient.
+
+--- 6. MOST IMPACTFUL IMMEDIATE IMPROVEMENT ---
+
+Randomize the starting position of the robot AND the ball between episodes.
+
+Currently the robot always starts at the same position facing the ball.
+It learns a specific fixed route, not general navigation. This is why it
+fails in "unknown environments" — it has never seen a different starting
+configuration during training.
+
+--- SOURCES ---
+- Continual RL in Webots: Navigate Without Forgetting (GitHub: 7abushahla)
+- Autonomous Navigation with Off-Policy RL and Curriculum Learning (ScienceDirect 2024)
+- Reward Shaping for Navigation Deep RL (Springer 2025)
+- Autonomous Navigation: Sensor Fusion Deep RL (MDPI 2024)
+- Deep RL Mobile Robot Navigation Review (MDPI 2025)
+- Feature Selection for e-Puck Navigation (Springer 2024)
+- Hindsight Experience Replay (Andrychowicz et al.)
+
+
+--------------------------------------------------------------------------------
+ČESKÁ VERZE
+--------------------------------------------------------------------------------
+
+CÍL: Natrénovat e-puck robota ve Webots tak, aby se dokázal orientovat
+     v neznámém prostředí, najít červený míč a spolehlivě k němu dojít.
+
+--- 1. CURRICULUM LEARNING (nejdůležitější) ---
+
+Nejsilnější přístup ověřený v Webots prostředích. Obtížnost je nutné zvyšovat
+postupně — přeskočení fází vede k výrazně horší výsledné politice.
+
+  Fáze 1 (aktuální): Prázdná aréna, robot startuje na pevné pozici otočený k míči.
+  Fáze 2:            1-2 statické překážky mezi robotem a míčem.
+  Fáze 3:            Náhodné pozice překážek I míče v každé epizodě.
+  Fáze 4:            Husté prostředí, více překážek, i startovní pozice robota náhodná.
+
+--- 2. REWARD FUNKCE ---
+
+Doporučená struktura z literatury:
+
+  reward = goal_bonus + step_penalty + crash_penalty + distance_potential
+
+  goal_bonus:         +100 když se robot fyzicky dotkne míče
+  step_penalty:       -0.05 za každý simulační krok (nutí robota k pohybu)
+  crash_penalty:      -1 až -5 za kolizi s překážkou nebo zdí
+                      POZOR: příliš velká crash penalty způsobuje divergenci —
+                      robot se naučí stát na místě místo aby navigoval
+  distance_potential: odměna úměrná snížení vzdálenosti k cíli
+                      (tvůj delta reward na červených pixelech toto správně aproximuje)
+
+--- 3. VOLBA ALGORITMU ---
+
+Pro spojitý akční prostor a vysokodimenzionální pozorování:
+
+  SAC  > TD3 > PPO
+
+  Výhody SAC:
+  - Entropická regularizace přirozeně podporuje exploraci
+  - Off-policy = efektivní využití vzorků
+  - Nejlepší stabilita ze tří algoritmů
+
+  PPO potřebuje výrazně více trénovacích kroků pro navigační úlohy.
+  SAC již používáš — správná volba.
+
+--- 4. OBSERVATION SPACE ---
+
+Tvoje aktuální konfigurace (kamera + 8 proximity senzorů) odpovídá best-practice:
+  - Kamera: lokalizace cíle (pozice červených pixelů, poměr)
+  - Proximity senzory: detekce překážek nezávislá na osvětlení
+
+Multimodální fúze senzorů konzistentně překonává přístup pouze s kamerou.
+
+--- 5. HINDSIGHT EXPERIENCE REPLAY (HER) ---
+
+Pokud trénink stagnuje, HER přeznačí neúspěšné epizody jako úspěchy
+k mezicílům — z neúspěchů se tak stávají užitečné učební signály.
+
+  from stable_baselines3 import HerReplayBuffer
+  model = SAC("MlpPolicy", env, replay_buffer_class=HerReplayBuffer, ...)
+
+Vyžaduje goal-conditioned environment (GoalEnv rozhraní) — středně velký refactor.
+Stojí za implementaci pokud curriculum learning sám nestačí.
+
+--- 6. NEJDŮLEŽITĚJŠÍ OKAMŽITÉ ZLEPŠENÍ ---
+
+Randomizovat startovní pozici robota I míče mezi epizodami.
+
+Aktuálně robot vždy startuje na stejném místě otočený k míči.
+Naučí se konkrétní pevnou trasu, ne obecnou navigaci. Proto selhává
+v "neznámém prostředí" — během tréninku nikdy neviděl jinou výchozí konfiguraci.
+
+--- ZDROJE ---
+- Continual RL in Webots: Navigate Without Forgetting (GitHub: 7abushahla)
+- Autonomous Navigation with Off-Policy RL and Curriculum Learning (ScienceDirect 2024)
+- Reward Shaping for Navigation Deep RL (Springer 2025)
+- Autonomous Navigation: Sensor Fusion Deep RL (MDPI 2024)
+- Deep RL Mobile Robot Navigation Review (MDPI 2025)
+- Feature Selection for e-Puck Navigation (Springer 2024)
+- Hindsight Experience Replay (Andrychowicz et al.)
+
+================================================================================

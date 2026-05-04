@@ -5,9 +5,7 @@ EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023a/project
 EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023a/projects/objects/floors/protos/RectangleArena.proto"
 EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023a/projects/robots/gctronic/e-puck/protos/E-puck.proto"
 EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023a/projects/appearances/protos/Parquetry.proto"
-EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/obstacles/protos/OilBarrel.proto"
 EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/factory/containers/protos/WoodenBox.proto"
-EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/factory/containers/protos/CardboardBox.proto"
 EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/apartment_structure/protos/Wall.proto"
 EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023a/projects/appearances/protos/BrushedAluminium.proto"
 
@@ -18,8 +16,8 @@ WorldInfo {
   title "E-puck simulation"
 }
 Viewpoint {
-  orientation -0.5601524750385999 0.6528212454382916 0.5099545334758079 2.06913433696933
-  position -0.10017912156053702 0.426604915838821 5.608896364086314
+  orientation 0.02383232911731603 -0.9984723730830181 -0.04984917530722302 5.389945269711999
+  position -2.7504781105696585 -0.015980926303612364 3.5835000892152196
   follow "e-puck"
 }
 TexturedBackground {
@@ -36,9 +34,10 @@ RectangleArena {
   }
 }
 DEF ROBOT E-puck {
-  translation -1.099999999999999 0.559999999999842 -6.396198718261296e-05
-  rotation 0.549981414355238 0.007225135183483124 -0.8351456407629704 4.440687883435861e-09
-  controller "main"
+  translation -0.839927 0.0242603 0.00467416
+  rotation -0.13350004132414323 -0.32651610107111567 -0.9357162896454081 0.171991
+  controller "<extern>"
+  supervisor TRUE
 }
 DEF GOAL Solid {
   translation 1.03 0 0.06
@@ -60,26 +59,32 @@ DEF GOAL Solid {
   }
   locked TRUE
 }
-DEF BARREL OilBarrel {
-  translation 1.01 0.36 0.1
-  height 0.2
-  radius 0.08
-}
-DEF BOX CardboardBox {
-  translation -0.78 -0.6 0.075
+DEF CUBE WoodenBox {
+  translation -0.54 0.91 0.075
   size 0.15 0.15 0.15
 }
 DEF CUBE WoodenBox {
-  translation 0.07 0.62 0.075
+  translation -0.09 1.05 0.075
+  name "wooden box(3)"
+  size 0.15 0.15 0.15
+}
+DEF CUBE WoodenBox {
+  translation -0.09 -1.18 0.075
+  name "wooden box(5)"
+  size 0.15 0.15 0.15
+}
+DEF CUBE WoodenBox {
+  translation -0.54 -0.89 0.075
+  name "wooden box(1)"
   size 0.15 0.15 0.15
 }
 DEF WALL1 Wall {
-  translation 0 -0.25 0
+  translation 2.71816e-06 -0.99 0
   rotation 0 0 1 1.5708
   size 0.02 1 0.1
 }
 DEF WALL2 Wall {
-  translation 0 0.25 0
+  translation 4.26093e-06 -0.91 0
   rotation 0 0 1 1.5708
   name "wall(5)"
   size 0.02 1 0.1
