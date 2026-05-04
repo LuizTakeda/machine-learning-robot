@@ -11,6 +11,10 @@ The strongest approach validated in Webots environments. Increase difficulty
 gradually — skipping phases leads to a significantly worse final policy.
 
   Phase 1 (current): Empty arena, robot starts at fixed position facing the ball.
+    Phase 1.1 facing wall, and then reaching the goal (not seeing the ball in the beginning)
+        randomizing the inital angle
+     Phase 1.2 facing wall, and then reaching the goal (not seeing the ball in the beginning)
+        randomizing the inital angle + initial position of the robot
   Phase 2:           1-2 static obstacles placed between robot and ball.
     2.1:
     2.2:
