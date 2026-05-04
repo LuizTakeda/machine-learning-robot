@@ -10,6 +10,9 @@ GOAL: Train an e-puck robot in Webots to navigate unknown environments,
 The strongest approach validated in Webots environments. Increase difficulty
 gradually — skipping phases leads to a significantly worse final policy.
 
+
+   TODO: DEFINE SPECIFIC NUMBER OF NEURONS AND LAYERS FOR THE POLICY NETWORK
+
   Phase 1 (current): Empty arena, robot starts at fixed position facing the ball.
     Phase 1.1 facing wall, and then reaching the goal (not seeing the ball in the beginning)
         randomizing the inital angle
