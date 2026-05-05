@@ -528,31 +528,59 @@ class RoombaRedBallEnv(gym.Env):
 environment = RoombaRedBallEnv()
 
 from stable_baselines3 import SAC
+import os
 
-# SAC (Soft Actor-Critic) - off-policy algorithm suitable for continuous actions
-# MlpPolicy = multi-layer perceptron, default two hidden layers of 64 neurons each.
-# Increase learning_starts if the agent behaves randomly for too long at the start.
-import torch
 
-_device = "cuda" if torch.cuda.is_available() else "cpu"
-print("CUDA available:", torch.cuda.is_available())
-if torch.cuda.is_available():
-    print("GPU:", torch.cuda.get_device_name(0))
-print("SAC device:", _device)
+def run_training(
+    resume_path=None,
+    total_timesteps=70_000,
+    output_path="following_red_ball_model_phase_1_1",
+    device=None,
+):
+    import torch
 
-model = SAC(
-    "MlpPolicy",
-    environment,
-    device=_device,
-    verbose=1,
-    learning_starts=1000,
-    batch_size=256,
-    gamma=0.99,
-    learning_rate=3e-4,
-)
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    print("CUDA available:", torch.cuda.is_available())
+    if torch.cuda.is_available():
+        print("GPU:", torch.cuda.get_device_name(0))
+    print("SAC device:", device)
 
-# 200 000 steps is a reasonable minimum for this task.
-# At FRAME_SKIP=5 and TIME_STEP=64ms, each agent step = 320ms of simulated time.
-model.learn(total_timesteps=70_000)
-model.save("following_red_ball_model_phase_1_1")
-print("Model saved to following_red_ball_model_phase_1_1.zip")
+    def _resolve(p):
+        if p is None:
+            return None
+        if os.path.exists(p):
+            return p
+        z = p + ".zip" if not p.endswith(".zip") else p
+        if os.path.exists(z):
+            return z
+        return None
+
+    resolved = _resolve(resume_path)
+    if resume_path and resolved is None:
+        raise FileNotFoundError(f"Checkpoint not found: {resume_path}")
+
+    if resolved:
+        print(f"Loading pretrained SAC from {resolved}")
+        model = SAC.load(resolved, env=environment, device=device, verbose=1)
+        model.learn(total_timesteps=total_timesteps, reset_num_timesteps=False)
+    else:
+        model = SAC(
+            "MlpPolicy",
+            environment,
+            device=device,
+            verbose=1,
+            learning_starts=1000,
+            batch_size=256,
+            gamma=0.99,
+            learning_rate=3e-4,
+        )
+        model.learn(total_timesteps=total_timesteps, reset_num_timesteps=True)
+
+    model.save(output_path)
+    print(f"Model saved to {output_path}.zip")
+    return model
+
+
+if __name__ == "__main__":
+    run_training()
