@@ -1,3 +1,8 @@
+"""
+Webots runtime controller for the policy trained in phase_1_3_corner_focused_training.py
+(random spawn position + yaw with extra weight on corners and mid-edge poses; fixed
+red ball — same 12-D observation as phase 1).
+"""
 import os
 import platform
 import sys
@@ -58,11 +63,29 @@ from controller import Supervisor
 import numpy as np
 from stable_baselines3 import SAC
 
-MODEL_PATH = "obstacle_avoidance_following_red_ball_model"
+MODEL_PATH = "following_red_ball_model_phase_1_3"
 
 TIME_STEP = 64
+# IMPORTANT: must match FRAME_SKIP in the training env. The training env runs
+# `for _ in range(FRAME_SKIP): robot.step(TIME_STEP)` per agent action, so the
+# policy was trained on a 5x slower control loop (~320 ms per decision). Without
+# this here, inference runs at 5x the bandwidth the policy expects and the
+# integrated motion (especially in-place rotation) does not match training.
+FRAME_SKIP = 5
 MAX_SPEED = 6.279
 WHEEL_DISTANCE = 0.052
+# When True, sample from the policy distribution instead of taking the mean
+# action. Useful while the policy is still under-trained on rare states (e.g.
+# wedged-blind in a corner): the mean action there can be a stuck attractor
+# because that state was not seen often enough during training. Stochastic
+# sampling matches what was used during training (ent_coef > 0), at the cost
+# of less reproducible runs.
+STOCHASTIC_INFERENCE = True
+# Print one line per agent decision with the action and key sensor state so we
+# can diagnose stuck behavior (is the policy commanding a spin? are the wheels
+# clipping it away? is `lin` saturated forward?). Set to a larger N to print
+# less often, or 0 to disable.
+DEBUG_PRINT_EVERY_N_STEPS = 8  # ~2.5 s at 320 ms/step
 
 robot = Supervisor()
 robot.simulationSetMode(Supervisor.SIMULATION_MODE_FAST)
@@ -120,10 +143,21 @@ model = SAC.load(MODEL_PATH)
 
 linear_velocity = 0.0
 angular_velocity = 0.0
+agent_step = 0
 
-while robot.step(TIME_STEP) != -1:
+# Prime the simulation so sensors return real values before the first inference.
+# Without this, `sensor.getValue()` returns NaN for sensors that were enabled but
+# never stepped, the observation becomes NaN, and SAC's policy outputs NaN actions
+# (Normal(loc=NaN, scale=NaN) -> ValueError).
+if robot.step(TIME_STEP) == -1:
+    raise SystemExit(0)
+
+while True:
     red_pixel_ratio, goal_horizontal_position = analyze_camera_for_red_ball()
     proximity_values = read_proximity_sensors()
+    # Defensive: if any sensor still has NaN/Inf (e.g. transient camera-frame issue),
+    # treat the slot as zero rather than feeding NaN into the policy.
+    proximity_values = np.nan_to_num(proximity_values, nan=0.0, posinf=1.0, neginf=0.0)
     observation = np.concatenate([
         np.array(
             [red_pixel_ratio, goal_horizontal_position, linear_velocity, angular_velocity],
@@ -132,19 +166,33 @@ while robot.step(TIME_STEP) != -1:
         proximity_values,
     ])
 
-    action, _ = model.predict(observation, deterministic=True)
+    action, _ = model.predict(observation, deterministic=not STOCHASTIC_INFERENCE)
     linear_velocity = float(action[0])
     angular_velocity = float(action[1])
 
-    left_wheel_speed = np.clip(
-        linear_velocity - angular_velocity * WHEEL_DISTANCE / 2.0,
-        -MAX_SPEED,
-        MAX_SPEED,
-    )
-    right_wheel_speed = np.clip(
-        linear_velocity + angular_velocity * WHEEL_DISTANCE / 2.0,
-        -MAX_SPEED,
-        MAX_SPEED,
-    )
+    # Match the training kinematics exactly: same conversion AND same wheel clip
+    # ([-MAX_SPEED, MAX_SPEED]). This avoids a small but real distribution
+    # shift versus what the policy saw during training.
+    left_pre = linear_velocity - angular_velocity * WHEEL_DISTANCE / 2.0
+    right_pre = linear_velocity + angular_velocity * WHEEL_DISTANCE / 2.0
+    left_wheel_speed = float(np.clip(left_pre, -MAX_SPEED, MAX_SPEED))
+    right_wheel_speed = float(np.clip(right_pre, -MAX_SPEED, MAX_SPEED))
     left_motor.setVelocity(left_wheel_speed)
     right_motor.setVelocity(right_wheel_speed)
+
+    if DEBUG_PRINT_EVERY_N_STEPS > 0 and agent_step % DEBUG_PRINT_EVERY_N_STEPS == 0:
+        prox_max = float(np.max(proximity_values))
+        clipped = (left_pre < 0) or (right_pre < 0)
+        print(
+            f"[step {agent_step:4d}] lin={linear_velocity:+.2f} ang={angular_velocity:+.2f}"
+            f" | wheels (L,R)=({left_wheel_speed:+.2f},{right_wheel_speed:+.2f})"
+            f"{'  CLIPPED' if clipped else ''}"
+            f" | red_px={red_pixel_ratio:.3f} goal_pos={goal_horizontal_position:+.2f}"
+            f" prox_max={prox_max:.2f}"
+        )
+    agent_step += 1
+
+    # Hold the action across FRAME_SKIP physics steps to match training.
+    for _ in range(FRAME_SKIP):
+        if robot.step(TIME_STEP) == -1:
+            raise SystemExit(0)

@@ -1,15 +1,21 @@
 """
-Webots controller — Phase 1.2: fixed goal (red ball) in the world as in phase 1,
-but every episode the robot is placed at a random (x, y) inside the arena with a
-random yaw. The policy must search, approach, and touch the ball from arbitrary
-poses. Training continues from the phase 1.1 checkpoint (`following_red_ball_model_phase_1_1`).
-Includes wall shaping, linear/prox penalties, blind-wall truncation (steps_blind_near_wall),
-two-tier wedged spin bonus, blind clearance reward when max IR drops, and orbit/stuck-wall truncation.
+Webots controller — Phase 1.3: corner-focused fine-tune on the same fixed-goal world.
 
-Goal world (x, y) is read once from DEF GOAL in the .wbt at startup for spawn
-distance checks; the ball is not moved between episodes.
+Same env, observations, action space, and rewards as phase 1.2. The only changes are:
 
-Observation / action / reward: same vector as phase_1_initial_training.py plus the above rewards.
+1. Spawn distribution: mixed sampling per episode reset
+       45% uniform random anywhere in the safe arena
+       35% corner pocket (within ε of one of 4 corners, yaw biased to face the wall)
+       20% mid-edge near a wall (yaw biased inward toward the wall)
+   This forces the policy to actually train on the “blind, facing wall” pose where it
+   was getting stuck in earlier phases instead of relying on rare uniform draws.
+
+2. stuck_blind_wall truncation now also subtracts a one-time penalty (-10) so the
+   critic gets a clear "this region is bad" signal at episode end.
+
+3. Replay buffer is saved alongside the model and loaded at resume.
+
+Defaults: continues from phase_1_2 weights and saves to `following_red_ball_model_phase_1_3`.
 """
 import os
 import platform
@@ -116,6 +122,8 @@ FRONT_RISE_COEFF = 8.0
 BLIND_RED_TH = 0.03
 MID_PROX_LO = 0.28
 BLIND_WALL_STUCK_LIMIT = 300
+# One-time penalty applied at episode end when the blind-wall hover counter triggers truncation.
+BLIND_WALL_STUCK_PENALTY = 10.0
 # Second spin tier when linear is high (fraction of SPIN_WHEN_WEDGED_K)
 SPIN_WHEN_WEDGED_HIGH_LINEAR_FRAC = 0.45
 # Reward lowering max IR while blind (clamped delta)
@@ -201,11 +209,20 @@ def _is_far_enough_from_obstacles(x, y, extra_margin=0.0):
     return True
 
 
-def sample_random_robot_pose(np_random):
-    """
-    Uniform position in the arena, uniform yaw on Z, at least MIN_ROBOT_GOAL_DISTANCE
-    from the fixed goal. Falls back to ROBOT_FALLBACK_POSITION if sampling fails.
-    """
+# --- Phase 1.3 mixed spawn distribution ---
+SPAWN_MIX = {
+    "uniform": 0.45,
+    "corner": 0.35,
+    "edge": 0.20,
+}
+CORNER_INSET = 0.18           # how close to the corner (m) the robot may be placed
+CORNER_YAW_BIAS = np.deg2rad(30)
+EDGE_INSET = 0.18             # how close to the edge wall the robot may be placed
+EDGE_YAW_BIAS = np.deg2rad(30)
+
+
+def _sample_in_arena_uniform(np_random):
+    """Original uniform sampler with goal-distance + obstacle clearance."""
     for _ in range(MAX_RANDOM_TRIES):
         rx = float(np_random.uniform(*ARENA_X_RANGE))
         ry = float(np_random.uniform(*ARENA_Y_RANGE))
@@ -215,8 +232,88 @@ def sample_random_robot_pose(np_random):
             continue
         yaw = float(np_random.uniform(-np.pi, np.pi))
         return [rx, ry, ROBOT_Z], ROBOT_YAW_AXIS + [yaw]
+    return None
+
+
+def _sample_corner(np_random):
+    """Spawn within CORNER_INSET of a randomly chosen arena corner, yaw aimed
+    diagonally into the corner (so the robot is facing the wall(s))."""
+    sx = -1.0 if np_random.uniform() < 0.5 else 1.0
+    sy = -1.0 if np_random.uniform() < 0.5 else 1.0
+    for _ in range(MAX_RANDOM_TRIES):
+        cx = ARENA_X_RANGE[0] if sx < 0 else ARENA_X_RANGE[1]
+        cy = ARENA_Y_RANGE[0] if sy < 0 else ARENA_Y_RANGE[1]
+        rx = float(cx - sx * np_random.uniform(0.0, CORNER_INSET))
+        ry = float(cy - sy * np_random.uniform(0.0, CORNER_INSET))
+        if (rx - GOAL_PLANE_X) ** 2 + (ry - GOAL_PLANE_Y) ** 2 < MIN_ROBOT_GOAL_DISTANCE ** 2:
+            continue
+        if not _is_far_enough_from_obstacles(rx, ry, extra_margin=0.05):
+            continue
+        # yaw pointing toward the corner walls (i.e. toward the corner from inside arena)
+        base_yaw = np.arctan2(sy, sx)
+        yaw = float(base_yaw + np_random.uniform(-CORNER_YAW_BIAS, CORNER_YAW_BIAS))
+        return [rx, ry, ROBOT_Z], ROBOT_YAW_AXIS + [yaw]
+    return None
+
+
+def _sample_edge(np_random):
+    """Spawn near one of the 4 edges (not corners), yaw aimed inward at the wall."""
+    edge = int(np_random.integers(0, 4))  # 0=south, 1=north, 2=west, 3=east
+    for _ in range(MAX_RANDOM_TRIES):
+        if edge == 0:        # bottom edge (low Y)
+            ry = float(ARENA_Y_RANGE[0] + np_random.uniform(0.0, EDGE_INSET))
+            rx = float(np_random.uniform(ARENA_X_RANGE[0] + 0.25, ARENA_X_RANGE[1] - 0.25))
+            base_yaw = -np.pi / 2
+        elif edge == 1:      # top edge
+            ry = float(ARENA_Y_RANGE[1] - np_random.uniform(0.0, EDGE_INSET))
+            rx = float(np_random.uniform(ARENA_X_RANGE[0] + 0.25, ARENA_X_RANGE[1] - 0.25))
+            base_yaw = np.pi / 2
+        elif edge == 2:      # left edge
+            rx = float(ARENA_X_RANGE[0] + np_random.uniform(0.0, EDGE_INSET))
+            ry = float(np_random.uniform(ARENA_Y_RANGE[0] + 0.20, ARENA_Y_RANGE[1] - 0.20))
+            base_yaw = np.pi
+        else:                # right edge
+            rx = float(ARENA_X_RANGE[1] - np_random.uniform(0.0, EDGE_INSET))
+            ry = float(np_random.uniform(ARENA_Y_RANGE[0] + 0.20, ARENA_Y_RANGE[1] - 0.20))
+            base_yaw = 0.0
+        if (rx - GOAL_PLANE_X) ** 2 + (ry - GOAL_PLANE_Y) ** 2 < MIN_ROBOT_GOAL_DISTANCE ** 2:
+            continue
+        if not _is_far_enough_from_obstacles(rx, ry, extra_margin=0.05):
+            continue
+        yaw = float(base_yaw + np_random.uniform(-EDGE_YAW_BIAS, EDGE_YAW_BIAS))
+        return [rx, ry, ROBOT_Z], ROBOT_YAW_AXIS + [yaw]
+    return None
+
+
+_SPAWN_SAMPLERS = {
+    "uniform": _sample_in_arena_uniform,
+    "corner": _sample_corner,
+    "edge": _sample_edge,
+}
+
+
+def sample_random_robot_pose(np_random):
+    """
+    Phase 1.3 mixed sampler. Returns (position, rotation, kind). The kind tag is
+    appended for logging; the callers in the env unpack only (position, rotation)
+    via the wrapper below to stay backward compatible with phase 1.2.
+    """
+    pose, kind = _sample_random_robot_pose_with_kind(np_random)
+    return pose
+
+
+def _sample_random_robot_pose_with_kind(np_random):
+    weights = list(SPAWN_MIX.values())
+    kinds = list(SPAWN_MIX.keys())
+    primary = kinds[int(np_random.choice(len(kinds), p=weights))]
+    order = [primary] + [k for k in kinds if k != primary]
+    for kind in order:
+        result = _SPAWN_SAMPLERS[kind](np_random)
+        if result is not None:
+            pos, rot = result
+            return (pos, rot), kind
     yaw_fb = float(np_random.uniform(-np.pi, np.pi))
-    return list(ROBOT_FALLBACK_POSITION), ROBOT_YAW_AXIS + [yaw_fb]
+    return (list(ROBOT_FALLBACK_POSITION), ROBOT_YAW_AXIS + [yaw_fb]), "fallback"
 
 
 def convert_velocities_to_motor_speeds(linear_velocity, angular_velocity):
@@ -399,6 +496,7 @@ class RoombaRedBallEnv(gym.Env):
         self.steps_near_ball = 0                 # linger near ball without progress (phase 2 orbit truncation)
         self.steps_blind_near_wall = 0           # blind + mid proximity wall hover (physics substeps)
         self.previous_sensor_max = 0.0           # for blind clearance shaping
+        self.last_spawn_kind = "unknown"         # logged each reset (uniform / corner / edge / fallback)
 
     def _build_observation(self):
         """Build the observation vector from current environment state.
@@ -438,7 +536,11 @@ class RoombaRedBallEnv(gym.Env):
                 f" | total reward: {self.episode_total_reward:.1f} ===\n"
             )
 
-        pos, rot = sample_random_robot_pose(self.np_random)
+        (pos, rot), spawn_kind = _sample_random_robot_pose_with_kind(self.np_random)
+        self.last_spawn_kind = spawn_kind
+        print(
+            f"[SPAWN] kind={spawn_kind:>7} pos=({pos[0]:+.2f},{pos[1]:+.2f}) yaw={rot[3]:+.2f}"
+        )
         robot_translation_field.setSFVec3f(pos)
         robot_rotation_field.setSFRotation(rot)
         # resetPhysics() zeros out velocity and inertia,
@@ -543,7 +645,17 @@ class RoombaRedBallEnv(gym.Env):
                 centering_improvement = abs(self.previous_goal_position) - abs(self.current_goal_position)
                 reward += centering_improvement * 2.0
             elif not ball_recently_visible:
-                reward -= 0.5
+                # Phase 1.3: drop this −0.5 while the agent is wedged + blind. With it on,
+                # even a max-rate spin (+SPIN_WHEN_WEDGED_K * |ang| ≈ +0.3) cannot overcome
+                # the −0.55/step floor, so SAC has no gradient toward "spin out of the
+                # corner". The wall gradient + blind-wall truncation already shape this
+                # state; we just remove the constant negative offset.
+                _wedged_blind_now = (
+                    sensor_max > WEDGED_SENSOR_MAX
+                    and self.current_red_pixel_ratio < WEDGED_RED_MAX
+                )
+                if not _wedged_blind_now:
+                    reward -= 0.5
 
             # --- Linger near ball without progress (phase 2 — breaks orbit / stall at goal) ---
             making_progress = (
@@ -671,6 +783,17 @@ class RoombaRedBallEnv(gym.Env):
         stuck_blind_wall = self.steps_blind_near_wall >= BLIND_WALL_STUCK_LIMIT
         truncated = timed_out or lost_ball or stuck_orbit or stuck_wall or stuck_blind_wall
 
+        # Phase 1.3: one-time terminal cost so the critic gets a clear "do not idle blind
+        # against a wall" signal at episode end. Only stuck_blind_wall is treated as a
+        # bad terminal state; orbit / lost_ball / stuck_wall already shape the policy via
+        # their per-step penalties, and timed_out is just a budget cap.
+        if stuck_blind_wall and not terminated:
+            accumulated_reward -= BLIND_WALL_STUCK_PENALTY
+            print(
+                f"[BLIND-WALL TRUNC] applying -{BLIND_WALL_STUCK_PENALTY:.1f} penalty"
+                f" (blind_wall={self.steps_blind_near_wall}, prox_max={float(np.max(self.current_proximities)):.2f})"
+            )
+
         self.episode_total_reward += accumulated_reward
         observation = self._build_observation()
 
@@ -710,11 +833,20 @@ import os
 def run_training(
     resume_path=None,
     total_timesteps=70_000,
-    output_path="following_red_ball_model_phase_1_2",
+    output_path="following_red_ball_model_phase_1_3",
     device=None,
+    replay_buffer_load_path=None,
+    replay_buffer_save_path=None,
+    save_replay_buffer=True,
 ):
     """
-    Fine-tune on phase 1.2 env. Default checkpoint is phase 1.1 unless resume_path is set.
+    Phase 1.3 corner-focused fine-tune.
+
+    Defaults:
+      - resume from `following_red_ball_model_phase_1_2`
+      - save model to `following_red_ball_model_phase_1_3.zip`
+      - save replay buffer to `<output_path>_replay_buffer.pkl`
+      - if a replay buffer next to the resume checkpoint exists, load it
     """
     import torch
 
@@ -725,7 +857,7 @@ def run_training(
         print("GPU:", torch.cuda.get_device_name(0))
     print("SAC device:", device)
 
-    default_ckpt = "following_red_ball_model_phase_1_1"
+    default_ckpt = "following_red_ball_model_phase_1_2"
     ckpt = resume_path if resume_path else default_ckpt
     if os.path.exists(ckpt):
         resolved = ckpt
@@ -738,9 +870,38 @@ def run_training(
 
     print(f"Loading pretrained SAC from {resolved} …")
     model = SAC.load(resolved, env=environment, device=device, verbose=1)
+
+    # ---- Replay buffer load ----
+    if replay_buffer_load_path is None:
+        # default: look for a buffer alongside the resumed checkpoint
+        base = resolved[:-4] if resolved.endswith(".zip") else resolved
+        candidate = base + "_replay_buffer.pkl"
+        if os.path.exists(candidate):
+            replay_buffer_load_path = candidate
+
+    if replay_buffer_load_path and os.path.exists(replay_buffer_load_path):
+        print(f"Loading replay buffer from {replay_buffer_load_path} …")
+        try:
+            model.load_replay_buffer(replay_buffer_load_path)
+            print(f"Replay buffer size after load: {model.replay_buffer.size()}")
+        except Exception as e:
+            print(f"WARN: failed to load replay buffer ({e}); continuing without it.")
+    else:
+        print("No replay buffer to load; starting with an empty buffer.")
+
     model.learn(total_timesteps=total_timesteps, reset_num_timesteps=False)
     model.save(output_path)
     print(f"Model saved to {output_path}.zip")
+
+    # ---- Replay buffer save ----
+    if save_replay_buffer:
+        if replay_buffer_save_path is None:
+            replay_buffer_save_path = output_path + "_replay_buffer.pkl"
+        try:
+            model.save_replay_buffer(replay_buffer_save_path)
+            print(f"Replay buffer saved to {replay_buffer_save_path}")
+        except Exception as e:
+            print(f"WARN: failed to save replay buffer ({e})")
     return model
 
 

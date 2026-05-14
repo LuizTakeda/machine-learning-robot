@@ -1,10 +1,58 @@
+import os
+import platform
 import sys
 
-DESKTOP_SETUP = True
-if DESKTOP_SETUP:
-    sys.path.append(r'D:\Webots\lib\controller\python')
-else:
-    sys.path.append(r'C:\Program Files\Webots\lib\controller\python')
+
+def _prepend_webots_controller_python_path():
+    """So `import controller` works when the script is not started by Webots."""
+    sysname = platform.system()
+
+    if "WEBOTS_HOME" not in os.environ or not os.environ["WEBOTS_HOME"]:
+        if sysname == "Darwin":
+            default_bundle = "/Applications/Webots.app"
+            if os.path.isdir(default_bundle):
+                os.environ["WEBOTS_HOME"] = default_bundle
+        elif sysname == "Linux":
+            for candidate in ("/usr/local/webots",):
+                if os.path.isdir(candidate):
+                    os.environ["WEBOTS_HOME"] = candidate
+                    break
+
+    home = os.environ.get("WEBOTS_HOME") or ""
+    if sysname == "Darwin" and home.rstrip("/").endswith("/Contents"):
+        fixed = os.path.dirname(home.rstrip("/"))
+        if fixed.endswith(".app"):
+            os.environ["WEBOTS_HOME"] = fixed
+            home = fixed
+
+    candidates = []
+    if home:
+        if sysname == "Darwin":
+            candidates.append(os.path.join(home, "Contents", "lib", "controller", "python"))
+        else:
+            candidates.append(os.path.join(home, "lib", "controller", "python"))
+    if sysname == "Darwin":
+        candidates.append("/Applications/Webots.app/Contents/lib/controller/python")
+    elif sysname == "Windows":
+        candidates.append(r"D:\Webots\lib\controller\python")
+        candidates.append(r"C:\Program Files\Webots\lib\controller\python")
+    elif sysname == "Linux":
+        candidates.append("/usr/local/webots/lib/controller/python")
+
+    for path in candidates:
+        if path and os.path.isdir(path):
+            sys.path.insert(0, path)
+            return
+
+    tried = ", ".join(p for p in candidates if p) or "(none)"
+    raise ImportError(
+        "Webots Python API not found (expected a folder containing controller.py). "
+        f"Tried: {tried}. Install Webots or set WEBOTS_HOME to the install root "
+        '(on macOS use e.g. WEBOTS_HOME=/Applications/Webots.app, not ".../Contents").'
+    )
+
+
+_prepend_webots_controller_python_path()
 
 from controller import Supervisor
 import numpy as np

@@ -1,21 +1,31 @@
 """
-Webots controller - e-puck robot learns to approach a red ball
-using reinforcement learning (SAC).
+Webots controller — Phase 2.5: randomized robot AND goal positions.
+
+Curriculum step that follows phase 1 (fixed start, empty arena) and phase 2
+(fixed start + obstacles). Here the policy from phase 2 keeps training in the
+same arena, but on every episode reset both the robot pose and the red ball
+position are sampled uniformly inside the arena (with a minimum separation),
+forcing the agent to generalize beyond the single fixed approach trajectory it
+saw during phases 1 & 2.
+
+Observation / action / reward functions are identical to phase 2 so the
+existing weights load without shape mismatch.
 
 Observation space:
-    [red_pixel_ratio, goal_horizontal_position, linear_velocity, angular_velocity, front_proximity]
+    [red_pixel_ratio, goal_horizontal_position, linear_velocity, angular_velocity,
+     ps0, ps1, ps2, ps3, ps4, ps5, ps6, ps7]
 
 Action space:
     [linear_velocity, angular_velocity]
 
 Reward:
-    - Red pixel ratio (closer = more red pixels visible)
-    - Change in red pixel ratio (approaching vs moving away)
-    - Centering bonus (ball in the middle of the image)
-    - Penalty for losing sight of the ball
-    - Step penalty (forces the agent to move, not stand still)
-    - Proximity bonus (physical closeness via front sensor)
-    - Large bonus for reaching the goal (physical contact)
+    - Visibility / approach (red pixel ratio + delta)
+    - Centering bonus (delta-based)
+    - Loss-of-sight penalty
+    - Step penalty
+    - Smooth wall avoidance gradient (when ball is not dominant)
+    - Wall crash penalty
+    - Large bonus for physically reaching the goal
 """
 import os
 import platform
@@ -87,31 +97,47 @@ TIME_STEP = 64                   # simulation step in milliseconds
 MAX_SPEED = 6.279                # max angular velocity of e-puck motors [rad/s]
 
 # --- Episode constants ---
-MAX_STEPS_PER_EPISODE = 10000     # max steps per episode
-# Physical contact threshold: front proximity sensor value > 0.95 means the robot
-# is essentially touching the ball. Much more realistic than a 95% pixel ratio.
+MAX_STEPS_PER_EPISODE = 10000
 PROXIMITY_GOAL_THRESHOLD = 0.95  # normalized proximity sensor value (0.0 - 1.0)
-STEPS_WITHOUT_BALL_LIMIT = 6000    # steps without seeing the ball before truncation
+STEPS_WITHOUT_BALL_LIMIT = 6000
 FRAME_SKIP = 5
 
-# --- Robot starting pose (values from .wbt file) ---
-ROBOT_START_POSITION = [-1.1, 0.019, 0.0]   # [x, y, z] in meters
-ROBOT_START_ROTATION = [0, 0, 1, 0]         # [axis_x, axis_y, axis_z, angle] facing the ball
+# --- Arena & randomization bounds (world is Z-up, floor is X-Y plane) ---
+# RectangleArena floorSize is 2.5 x 1.5  ->  X in [-1.25, 1.25], Y in [-0.75, 0.75].
+# A safety margin keeps the e-puck (radius ~0.037 m) and the ball (radius 0.06 m)
+# clear of the surrounding walls.
+ARENA_X_RANGE = (-1.05, 1.05)
+ARENA_Y_RANGE = (-0.55, 0.55)
+
+# Heights are kept fixed at the same values used in sample_lab.wbt
+ROBOT_Z = 0.0
+GOAL_Z  = 0.06
+
+# Minimum spawn-time distance between robot center and ball center.
+# Below this the camera already sees a huge red blob at episode start, which
+# trivializes the task and washes out the approach reward signal.
+MIN_ROBOT_GOAL_DISTANCE = 0.7
+
+# Static obstacles (X, Y, conservative radius) that random spawn positions must
+# avoid. The four wooden boxes in sample_lab.wbt are placed BEHIND the arena
+# walls, so this list is empty in phase 2.5; phase 3 can extend it.
+STATIC_OBSTACLES = []  # e.g. [(-0.30, 0.00, 0.15)]
+
+# Maximum rejection-sampling attempts before falling back to a guaranteed-safe
+# but less-random pose. With the bounds above this never triggers in practice.
+MAX_RANDOM_TRIES = 50
+
+# Fallback poses (used on the very first reset before any sampling, and as the
+# guaranteed-safe fallback if rejection sampling somehow fails).
+ROBOT_START_POSITION = [-1.0, 0.0, ROBOT_Z]
+ROBOT_START_ROTATION = [0, 0, 1, 0]
+GOAL_START_POSITION  = [ 1.0, 0.0, GOAL_Z]
 
 # --- Supervisor initialization ---
-# Supervisor inherits from Robot but can also modify scene objects
-# (needed to reset the robot position between episodes)
 robot = Supervisor()
-
-# Fast simulation mode - skips rendering,
-# runs as fast as the CPU allows (typically 5-20x faster)
 robot.simulationSetMode(Supervisor.SIMULATION_MODE_FAST)
 
 # --- Proximity sensors ---
-# e-puck has 8 infrared sensors around its body
-# ps0-ps7: 0 = nothing detected, 4095 = max reflection
-# ps0 and ps7 point forward-right and forward-left respectively,
-# ps0 alone is a reasonable "front sensor" for detecting the ball ahead
 proximity_sensors = []
 PROXIMITY_SENSOR_NAMES = ['ps0', 'ps1', 'ps2', 'ps3', 'ps4', 'ps5', 'ps6', 'ps7']
 for i in range(8):
@@ -120,16 +146,13 @@ for i in range(8):
     proximity_sensors.append(sensor)
 
 # --- Camera ---
-# Camera resolution is set via camera_width and camera_height fields in Webots
 camera = robot.getDevice('camera')
 camera.enable(TIME_STEP)
 CAMERA_WIDTH = camera.getWidth()
 CAMERA_HEIGHT = camera.getHeight()
-TOTAL_PIXELS = CAMERA_WIDTH * CAMERA_HEIGHT  # total pixel count for normalization
+TOTAL_PIXELS = CAMERA_WIDTH * CAMERA_HEIGHT
 
 # --- Motors ---
-# setPosition(inf) = continuous rotation (not angle positioning)
-# setVelocity(0) = start stationary
 left_motor = robot.getDevice('left wheel motor')
 right_motor = robot.getDevice('right wheel motor')
 left_motor.setPosition(float('inf'))
@@ -138,67 +161,30 @@ left_motor.setVelocity(0.0)
 right_motor.setVelocity(0.0)
 
 # --- Supervisor references for position reset ---
-# getFromDef('ROBOT') finds the node with DEF ROBOT in the .wbt file
-# getField() gets a reference to a specific field that we can modify
 robot_node = robot.getFromDef('ROBOT')
 robot_translation_field = robot_node.getField('translation')
 robot_rotation_field = robot_node.getField('rotation')
 
 goal_node = robot.getFromDef('GOAL')
+# Phase 2.5 also moves the goal between episodes, which requires a writable
+# handle to its translation field.
+goal_translation_field = goal_node.getField('translation')
 
 # --- Robot dimensions ---
-# Distance between e-puck wheels - needed for converting
-# linear/angular velocity to individual wheel speeds
 WHEEL_DISTANCE = 0.052  # [meters]
 
 
 def convert_velocities_to_motor_speeds(linear_velocity, angular_velocity):
-    """
-    Convert (linear_velocity, angular_velocity) to (left_wheel, right_wheel).
-
-    Based on differential drive kinematics:
-        v_left  = v_linear - v_angular * (d / 2)
-        v_right = v_linear + v_angular * (d / 2)
-
-    where:
-        v_linear  = forward speed of the robot center [motor rad/s]
-        v_angular = turning speed (positive = left) [rad/s]
-        d         = distance between wheels [m]
-
-    Derivation:
-        Robot center velocity:  v_linear  = (v_left + v_right) / 2
-        Robot turning rate:     v_angular = (v_right - v_left) / d
-        Solving these two equations for v_left and v_right gives the formulas above.
-    """
+    """Differential-drive kinematics -> (left_wheel, right_wheel) speeds."""
     left_speed = linear_velocity - angular_velocity * WHEEL_DISTANCE / 2.0
     right_speed = linear_velocity + angular_velocity * WHEEL_DISTANCE / 2.0
-
-    # Clamp to max motor speed
     left_speed = np.clip(left_speed, -MAX_SPEED, MAX_SPEED)
     right_speed = np.clip(right_speed, -MAX_SPEED, MAX_SPEED)
     return left_speed, right_speed
 
 
 def analyze_camera_for_red_ball():
-    """
-    Analyze the camera image and detect the red ball.
-
-    Steps:
-        1. Read raw image from camera (BGRA format, 4 channels)
-        2. Create red pixel mask: R > 130 AND G < 80 AND B < 80
-           (red channel must be bright, green and blue must be dark)
-        3. Compute red pixel ratio:
-             ratio = red_pixel_count / total_pixel_count
-           Result is in range 0.0 (none) to 1.0 (entire image is red)
-        4. Compute horizontal position of the ball:
-             avg_x = mean(x-coordinates of red pixels)
-             position = (avg_x / (width - 1)) * 2 - 1
-           This normalizes to range -1 (left edge) to +1 (right edge)
-
-    Returns:
-        red_pixel_ratio: ratio of red pixels (0.0 - 1.0)
-        goal_horizontal_position: horizontal ball position (-1.0 to +1.0)
-    """
+    """Return (red_pixel_ratio, goal_horizontal_position) from the camera image."""
     try:
         raw_image = camera.getImage()
     except ValueError:
@@ -206,28 +192,18 @@ def analyze_camera_for_red_ball():
     if not raw_image:
         return 0.0, 0.0
 
-    # Webots returns image as BGRA (4 bytes per pixel)
     image = np.frombuffer(raw_image, np.uint8).reshape((CAMERA_HEIGHT, CAMERA_WIDTH, 4))
     blue_channel = image[:, :, 0]
     green_channel = image[:, :, 1]
     red_channel = image[:, :, 2]
 
-    # Mask: True for pixels that are "red enough"
     red_pixel_mask = (red_channel > 130) & (green_channel < 80) & (blue_channel < 80)
     red_pixel_count = np.count_nonzero(red_pixel_mask)
-
-    # Ratio of red pixels to total image
     red_pixel_ratio = red_pixel_count / TOTAL_PIXELS
 
-    # Horizontal goal position - where in the image the ball is located
     if red_pixel_count > 0:
-        # np.where returns (rows, columns) - we want columns = x coordinates
         red_pixel_columns = np.where(red_pixel_mask)[1]
         average_x = np.mean(red_pixel_columns)
-        # Normalize to [-1, +1]:
-        #   pixel 0 (left edge)      -> (0 / (W-1)) * 2 - 1 = -1
-        #   pixel (W-1)/2 (center)   -> (0.5) * 2 - 1       =  0
-        #   pixel W-1 (right edge)   -> (1) * 2 - 1          = +1
         goal_horizontal_position = (average_x / (CAMERA_WIDTH - 1)) * 2.0 - 1.0
     else:
         goal_horizontal_position = 0.0
@@ -236,60 +212,90 @@ def analyze_camera_for_red_ball():
 
 
 def get_front_proximity():
-    """
-    Read the front proximity sensor and normalize to [0.0, 1.0].
-
-    ps0 points forward-right. Using the mean of ps0 and ps7 (forward-left)
-    gives a more balanced 'front' reading.
-
-    Returns:
-        float: 0.0 = nothing in front, 1.0 = object touching the sensor
-    """
+    """Mean of ps0 + ps7, normalized to [0.0, 1.0]."""
     front_value = (proximity_sensors[0].getValue() + proximity_sensors[7].getValue()) / 2.0
     return np.clip(front_value / 4095.0, 0.0, 1.0)
 
 
 def get_all_proximities():
-    """
-    Read all 8 proximity sensors (ps0-ps7) and normalize each to [0.0, 1.0].
-
-    Layout on e-puck:
-        ps7  ps0   -> forward
-        ps6        ps1   -> forward-sides
-        ps5        ps2   -> sides
-        ps4        ps3   -> rear
-
-    Returns:
-        np.ndarray of shape (8,) with values in [0.0, 1.0].
-    """
+    """Return all 8 proximity sensors normalized to [0.0, 1.0]."""
     values = np.array([s.getValue() for s in proximity_sensors], dtype=np.float32)
     return np.clip(values / 4095.0, 0.0, 1.0)
 
 
+def _is_far_enough_from_obstacles(x, y, extra_margin=0.0):
+    """True if (x, y) is at least `obstacle_radius + extra_margin` from every static obstacle."""
+    for ox, oy, oradius in STATIC_OBSTACLES:
+        if (x - ox) ** 2 + (y - oy) ** 2 < (oradius + extra_margin) ** 2:
+            return False
+    return True
+
+
+def sample_random_episode_layout(np_random):
+    """
+    Sample a fresh (robot_position, robot_rotation, goal_position) for an episode.
+
+    Both poses are drawn uniformly inside the safe arena bounds. We re-sample
+    until the robot and the goal are at least MIN_ROBOT_GOAL_DISTANCE apart and
+    neither overlaps any static obstacle. After MAX_RANDOM_TRIES we fall back to
+    the constant start poses so the episode can still proceed.
+
+    The robot heading is drawn uniformly in [-pi, pi] around the world up axis
+    (Z, matching the world's ENU orientation), so the policy must learn to find
+    the ball regardless of initial heading.
+    """
+    # 1) Goal position.
+    goal_x, goal_y = ROBOT_START_POSITION[0] + 1.5, 0.0  # placeholder, overwritten below
+    for _ in range(MAX_RANDOM_TRIES):
+        gx = float(np_random.uniform(*ARENA_X_RANGE))
+        gy = float(np_random.uniform(*ARENA_Y_RANGE))
+        if _is_far_enough_from_obstacles(gx, gy, extra_margin=0.10):
+            goal_x, goal_y = gx, gy
+            break
+    else:
+        goal_x, goal_y = GOAL_START_POSITION[0], GOAL_START_POSITION[1]
+
+    # 2) Robot position — must be far from goal and from obstacles.
+    robot_x, robot_y = ROBOT_START_POSITION[0], ROBOT_START_POSITION[1]
+    for _ in range(MAX_RANDOM_TRIES):
+        rx = float(np_random.uniform(*ARENA_X_RANGE))
+        ry = float(np_random.uniform(*ARENA_Y_RANGE))
+        if (rx - goal_x) ** 2 + (ry - goal_y) ** 2 < MIN_ROBOT_GOAL_DISTANCE ** 2:
+            continue
+        if not _is_far_enough_from_obstacles(rx, ry, extra_margin=0.05):
+            continue
+        robot_x, robot_y = rx, ry
+        break
+
+    # 3) Heading — uniform over the full circle, around the world up axis (Z).
+    yaw = float(np_random.uniform(-np.pi, np.pi))
+
+    robot_position = [robot_x, robot_y, ROBOT_Z]
+    robot_rotation = [0.0, 0.0, 1.0, yaw]
+    goal_position  = [goal_x, goal_y, GOAL_Z]
+    return robot_position, robot_rotation, goal_position
+
+
 class RoombaRedBallEnv(gym.Env):
     """
-    Gymnasium environment for an e-puck robot learning to find and approach
-    a red ball in a Webots simulation.
+    Same Gymnasium environment as phase 2, but with randomized robot and goal
+    positions on every reset.
     """
 
     def __init__(self, render_mode=None):
         super().__init__()
 
-        # Action space: agent controls linear and angular velocity
-        # linear_velocity: [-MAX_SPEED, MAX_SPEED], angular_velocity: [-MAX_SPEED, +MAX_SPEED]
         self.action_space = spaces.Box(
             low=np.array([-MAX_SPEED, -MAX_SPEED], dtype=np.float32),
             high=np.array([MAX_SPEED, MAX_SPEED], dtype=np.float32),
         )
 
-        # Defines the valid range for each value in the observation vector.
-        # The RL algorithm uses these bounds to normalize inputs — they must match reality
-        # exactly, otherwise the algorithm expects values that never occur.
-        #   low/high[0]  red_pixel_ratio:           0.0 (no red) .. 1.0 (full image red)
-        #   low/high[1]  goal_horizontal_position: -1.0 (ball left edge) .. +1.0 (ball right edge)
-        #   low/high[2]  linear_velocity:          -MAX_SPEED (full reverse) .. MAX_SPEED (full forward)
-        #   low/high[3]  angular_velocity:         -MAX_SPEED (full right) .. +MAX_SPEED (full left)
-        #   low/high[4-11] proximity sensors ps0..ps7: 0.0 (nothing) .. 1.0 (touching)
+        # Same 12-D observation as phase 2 — keeps the loaded weights compatible.
+        #   [0]    red_pixel_ratio          0.0 .. 1.0
+        #   [1]    goal_horizontal_position -1.0 .. 1.0
+        #   [2]    linear_velocity          0.0 .. MAX_SPEED
+        #   [3]    angular_velocity         -MAX_SPEED .. MAX_SPEED
+        #   [4-11] proximity ps0..ps7       0.0 .. 1.0
         self.observation_space = spaces.Box(
             low=np.array(
                 [0.0, -1.0, -MAX_SPEED, -MAX_SPEED] + [0.0] * 8,
@@ -304,27 +310,32 @@ class RoombaRedBallEnv(gym.Env):
         self.render_mode = render_mode
 
         # --- Environment state ---
-        self.current_red_pixel_ratio = 0.0     # current red pixel ratio
-        self.previous_red_pixel_ratio = 0.0    # previous step ratio (for computing delta)
-        self.current_goal_position = 0.0       # horizontal ball position in the image
-        self.previous_goal_position = 0.0      # previous step position (for centering delta)
-        self.current_linear_velocity = 0.0     # current linear velocity
-        self.current_angular_velocity = 0.0    # current angular velocity
-        self.current_front_proximity = 0.0     # normalized front proximity (ps0+ps7 mean, used for reward)
-        self.current_proximities = np.zeros(8, dtype=np.float32)  # all 8 normalized proximity sensors
+        self.current_red_pixel_ratio = 0.0
+        self.previous_red_pixel_ratio = 0.0
+        self.current_goal_position = 0.0
+        self.previous_goal_position = 0.0
+        self.current_linear_velocity = 0.0
+        self.current_angular_velocity = 0.0
+        self.current_front_proximity = 0.0
+        self.current_proximities = np.zeros(8, dtype=np.float32)
 
         # --- Counters ---
-        self.step_count = 0                    # steps in current episode
-        self.steps_without_red_ball = 0        # consecutive steps without seeing the ball
-        self.episode_count = 0                 # episode number
-        self.episode_total_reward = 0.0        # cumulative reward in current episode
-        self.steps_since_ball_in_front = 999   # steps since ball was visible and centered (999 = never)
-        self.steps_since_ball_visible = 999    # steps since ball was visible at all (999 = never)
-        self.steps_near_ball = 0               # consecutive steps with ball visible but goal not reached
-        self.steps_touching_wall = 0           # consecutive steps in contact with a wall (not the ball)
+        self.step_count = 0
+        self.steps_without_red_ball = 0
+        self.episode_count = 0
+        self.episode_total_reward = 0.0
+        self.steps_since_ball_in_front = 999
+        self.steps_since_ball_visible = 999
+        self.steps_near_ball = 0
+        self.steps_touching_wall = 0
+
+        # Last sampled spawn poses, kept so per-step logging can show the
+        # current goal/robot setup without an extra supervisor call.
+        self.current_spawn_robot = list(ROBOT_START_POSITION)
+        self.current_spawn_goal  = list(GOAL_START_POSITION)
 
     def _build_observation(self):
-        """Build the observation vector from current environment state."""
+        """Build the 12-D observation vector from current environment state."""
         return np.concatenate([
             np.array([
                 self.current_red_pixel_ratio,
@@ -339,33 +350,48 @@ class RoombaRedBallEnv(gym.Env):
         """
         Reset the environment for a new episode.
 
-        1. Stop motors
-        2. Teleport robot back to starting position (supervisor API)
-        3. Reset physics (zero out inertia and velocities)
-        4. Zero out all state variables
+        Phase 2.5 difference: in addition to teleporting the robot, the goal
+        (red ball) is also teleported, and both the robot's (x, y, yaw) and
+        the goal's (x, y) are sampled uniformly inside the arena under a
+        minimum-separation constraint.
         """
         super().reset(seed=seed)
 
-        # Stop motors
         left_motor.setVelocity(0.0)
         right_motor.setVelocity(0.0)
 
-        # Print stats of the completed episode
         if self.step_count > 0:
             self.episode_count += 1
-            print(f"\n=== EPISODE {self.episode_count} DONE | steps: {self.step_count} | total reward: {self.episode_total_reward:.1f} ===\n")
+            print(
+                f"\n=== EPISODE {self.episode_count} DONE"
+                f" | steps: {self.step_count}"
+                f" | total reward: {self.episode_total_reward:.1f} ===\n"
+            )
 
-        # Teleport robot to starting position using supervisor API
-        robot_translation_field.setSFVec3f(ROBOT_START_POSITION)
-        robot_rotation_field.setSFRotation(ROBOT_START_ROTATION)
-        # resetPhysics() zeros out velocity and inertia,
-        # otherwise the robot would keep moving from the previous episode
+        # Sample a fresh layout for this episode.
+        robot_position, robot_rotation, goal_position = sample_random_episode_layout(self.np_random)
+        self.current_spawn_robot = robot_position
+        self.current_spawn_goal  = goal_position
+
+        robot_translation_field.setSFVec3f(robot_position)
+        robot_rotation_field.setSFRotation(robot_rotation)
+        goal_translation_field.setSFVec3f(goal_position)
+
+        # Zero out residual physics so neither object inherits velocity from
+        # the previous episode.
         robot_node.resetPhysics()
+        goal_node.resetPhysics()
 
-        # One simulation step so the new position takes effect
+        print(
+            f"--- Episode {self.episode_count + 1} layout"
+            f" | robot ({robot_position[0]:+.2f},{robot_position[1]:+.2f}) yaw={robot_rotation[3]:+.2f}"
+            f" | goal ({goal_position[0]:+.2f},{goal_position[1]:+.2f}) ---"
+        )
+
+        # One simulation step so the new poses take effect before the policy
+        # observes the scene.
         robot.step(TIME_STEP)
 
-        # Zero out state
         self.current_red_pixel_ratio = 0.0
         self.previous_red_pixel_ratio = 0.0
         self.current_goal_position = 0.0
@@ -414,22 +440,12 @@ class RoombaRedBallEnv(gym.Env):
                 self.steps_without_red_ball = 0
 
             reward = 0.0
-
-            # --- Step penalty ---
             reward -= 0.05
-
-            # --- Visibility reward ---
-            # Small absolute reward for seeing the ball — gives gradient for exploration.
             reward += self.current_red_pixel_ratio * 3.0
 
-            # --- Delta reward ---
-            # Rewards getting CLOSER to the ball, penalizes moving away.
             pixel_ratio_change = self.current_red_pixel_ratio - self.previous_red_pixel_ratio
             reward += pixel_ratio_change * 10.0
 
-            # Track ball visibility (two levels):
-            #   ball_is_in_front  — visible AND centered (for centering delta)
-            #   ball_recently_visible — seen at all recently (for goal condition)
             ball_is_in_front = (
                 self.current_red_pixel_ratio > 0.1
                 and abs(self.current_goal_position) < 0.3
@@ -446,16 +462,12 @@ class RoombaRedBallEnv(gym.Env):
 
             ball_recently_visible = self.steps_since_ball_visible <= 30
 
-            # --- Centering bonus (delta-based) ---
             if self.current_red_pixel_ratio > 0.0:
                 centering_improvement = abs(self.previous_goal_position) - abs(self.current_goal_position)
                 reward += centering_improvement * 2.0
             elif not ball_recently_visible:
                 reward -= 0.5
 
-            # --- Temporal penalty for lingering near the ball ---
-            # Counter resets on real progress (red area growing OR centering improving),
-            # so the truncation fires only on genuine orbiting/stalling near the ball.
             making_progress = (
                 pixel_ratio_change > 0.001
                 or (abs(self.previous_goal_position) - abs(self.current_goal_position)) > 0.01
@@ -465,10 +477,6 @@ class RoombaRedBallEnv(gym.Env):
             elif making_progress:
                 self.steps_near_ball = 0
 
-            # --- Contact disambiguation ---
-            # The discriminator between "touching ball" and "touching wall" is red_pixel_ratio,
-            # NOT ball_recently_visible. Robot pressed against a wall while seeing the ball
-            # at distance has ball_recently_visible=True but red_pixel_ratio is small.
             sensor_max = np.max(self.current_proximities)
             in_contact = sensor_max > 0.9
             touching_ball = (
@@ -478,24 +486,15 @@ class RoombaRedBallEnv(gym.Env):
             )
             touching_wall = in_contact and not touching_ball
 
-            # --- Smooth wall avoidance gradient ---
-            # When the ball is NOT the dominant thing the sensors see (red small),
-            # any proximity reading means a wall. A small continuous penalty proportional
-            # to the highest reading gives the agent a learnable gradient before contact.
-            # Disabled near the ball (red >= 0.05) so close approach is not punished.
             if self.current_red_pixel_ratio < 0.05:
                 reward -= sensor_max * 0.3
 
-            # --- Wall crash penalty ---
-            # Stronger penalty than before (-2.0) so the gradient outweighs the
-            # +red*3 visibility reward when robot is pressed against a wall while seeing the ball.
             if touching_wall:
                 reward -= 2.0
                 self.steps_touching_wall += 1
             else:
                 self.steps_touching_wall = 0
 
-            # --- Goal: physical contact with the ball ---
             if touching_ball:
                 reward += 1000.0
                 print(f"*** GOAL REACHED at step {self.step_count}! proximity={self.current_front_proximity:.3f} ***")
@@ -503,7 +502,6 @@ class RoombaRedBallEnv(gym.Env):
 
             accumulated_reward += reward
 
-            # Break the frame-skip loop early if the episode ended
             timed_out   = self.step_count >= MAX_STEPS_PER_EPISODE
             lost_ball   = self.steps_without_red_ball >= STEPS_WITHOUT_BALL_LIMIT
             stuck_orbit = self.steps_near_ball >= 500
@@ -522,13 +520,14 @@ class RoombaRedBallEnv(gym.Env):
 
         if self.step_count % 50 == 0:
             rp = robot_translation_field.getSFVec3f()
-            gp = goal_node.getField('translation').getSFVec3f()
-            dist = np.sqrt((rp[0]-gp[0])**2 + (rp[2]-gp[2])**2)
+            gp = goal_translation_field.getSFVec3f()
+            # Floor distance is in the world's X-Y plane (Z is up in ENU).
+            dist = np.sqrt((rp[0] - gp[0]) ** 2 + (rp[1] - gp[1]) ** 2)
             ps = self.current_proximities
             print(
                 f"  step {self.step_count:4d}"
-                f" | robot ({rp[0]:+.2f},{rp[2]:+.2f})"
-                f" | ball ({gp[0]:+.2f},{gp[2]:+.2f})"
+                f" | robot ({rp[0]:+.2f},{rp[1]:+.2f})"
+                f" | ball ({gp[0]:+.2f},{gp[1]:+.2f})"
                 f" | dist {dist:.3f}"
                 f" | red {self.current_red_pixel_ratio:.3f}"
                 f" | cam_x {self.current_goal_position:+.2f}"
@@ -557,16 +556,17 @@ from stable_baselines3 import SAC
 def run_training(
     resume_path=None,
     total_timesteps=300_000,
-    output_path="obstacle_avoidance_following_red_ball_model",
-    replay_buffer_save_path="obstacle_avoidance_following_red_ball_replay_buffer.pkl",
-    replay_buffer_load_path=None,
-    load_replay_buffer=True,
+    output_path="randomized_following_red_ball_model",
+    output_replay_buffer_path="randomized_following_red_ball_replay_buffer.pkl",
+    phase2_preferred_path="obstacle_avoidance_following_red_ball_model.zip",
+    fallback_model_path="following_red_ball_model.zip",
+    obstacle_replay_buffer_path="obstacle_avoidance_following_red_ball_replay_buffer.pkl",
+    load_replay_buffer=None,
     device=None,
 ):
     """
-    Phase 2: continues from a checkpoint (default phase 1 following_red_ball_model).
-    Replay buffer: tries replay_buffer_load_path, then following_red_ball_replay_buffer.pkl,
-    then the save path (for resuming phase-2 training).
+    Phase 2.5: load phase-2 checkpoint by default; fallback to phase 1 if missing.
+    load_replay_buffer: if True load obstacle replay; if None, use env LOAD_REPLAY_BUFFER==1.
     """
     import os
     import torch
@@ -575,63 +575,56 @@ def run_training(
         device = "cuda" if torch.cuda.is_available() else "cpu"
     print("SAC device:", device)
 
-    def _resolve_model(path):
+    def _resolve(path):
         if os.path.exists(path):
             return path
-        if not path.endswith(".zip"):
-            z = path + ".zip"
-            if os.path.exists(z):
-                return z
+        base = path[:-4] if path.endswith(".zip") else path
+        z = base + ".zip"
+        if os.path.exists(z):
+            return z
         return None
 
-    base = resume_path or "following_red_ball_model_phase_1_3"
-    chosen = _resolve_model(base)
-    if not chosen:
+    if resume_path:
+        chosen_model_path = _resolve(resume_path)
+        if not chosen_model_path:
+            raise FileNotFoundError(f"Checkpoint not found: {resume_path}")
+    elif _resolve(phase2_preferred_path):
+        chosen_model_path = _resolve(phase2_preferred_path)
+    elif _resolve(fallback_model_path):
+        print(
+            f"WARNING: {phase2_preferred_path} not found, falling back to {fallback_model_path}. "
+            "Phase 2.5 is meant to run on top of phase 2."
+        )
+        chosen_model_path = _resolve(fallback_model_path)
+    else:
         raise FileNotFoundError(
-            f"No checkpoint found for {base} (.zip). Train phase 1 first or pass --checkpoint."
+            "No pretrained model found (neither phase-2 nor phase-1 checkpoint). "
+            "Pass --checkpoint or train earlier phases."
         )
 
-    print(f"Loading pretrained model from {chosen}")
+    print(f"Loading pretrained model from {chosen_model_path}")
     model = SAC.load(
-        chosen,
+        chosen_model_path,
         env=environment,
         verbose=1,
         device=device,
         learning_starts=1000,
         custom_objects={
-            "learning_rate": 1e-4,
+            "learning_rate": 5e-5,
             "batch_size": 256,
             "gamma": 0.99,
         },
     )
 
-    if load_replay_buffer:
-        candidates = []
-        if replay_buffer_load_path:
-            candidates.append(replay_buffer_load_path)
-        candidates.extend(
-            [
-                "following_red_ball_replay_buffer.pkl",
-                replay_buffer_save_path,
-            ]
-        )
-        loaded = False
-        seen = set()
-        for rp in candidates:
-            if not rp or rp in seen:
-                continue
-            seen.add(rp)
-            if os.path.exists(rp):
-                print(f"Loading replay buffer from {rp}")
-                model.load_replay_buffer(rp)
-                loaded = True
-                break
-        if not loaded:
-            print("No replay buffer file found; learning from an empty buffer.")
+    if load_replay_buffer is None:
+        load_replay_buffer = os.environ.get("LOAD_REPLAY_BUFFER", "0") == "1"
+    if load_replay_buffer and os.path.exists(obstacle_replay_buffer_path):
+        print(f"Loading replay buffer from {obstacle_replay_buffer_path}")
+        model.load_replay_buffer(obstacle_replay_buffer_path)
 
     model.learn(total_timesteps=total_timesteps, reset_num_timesteps=False)
     model.save(output_path)
-    model.save_replay_buffer(replay_buffer_save_path)
+    model.save_replay_buffer(output_replay_buffer_path)
     print(f"Model saved to {output_path}.zip")
     return model
 

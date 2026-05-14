@@ -1,0 +1,2 @@
+# No extra dependencies beyond the base evaluator environment
+# (numpy, torch, stable-baselines3, tensorboard, h5py).

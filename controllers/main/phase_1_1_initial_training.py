@@ -180,9 +180,9 @@ def convert_velocities_to_motor_speeds(linear_velocity, angular_velocity):
     left_speed = linear_velocity - angular_velocity * WHEEL_DISTANCE / 2.0
     right_speed = linear_velocity + angular_velocity * WHEEL_DISTANCE / 2.0
 
-    # Clamp to max motor speed (no reverse)
-    left_speed = np.clip(left_speed, 0, MAX_SPEED)
-    right_speed = np.clip(right_speed, 0, MAX_SPEED)
+    # Clamp to max motor speed
+    left_speed = np.clip(left_speed, -MAX_SPEED, MAX_SPEED)
+    right_speed = np.clip(right_speed, -MAX_SPEED, MAX_SPEED)
     return left_speed, right_speed
 
 
@@ -283,9 +283,9 @@ class RoombaRedBallEnv(gym.Env):
         super().__init__()
 
         # Action space: agent controls linear and angular velocity
-        # linear_velocity: [0, MAX_SPEED] (no reverse), angular_velocity: [-MAX_SPEED, +MAX_SPEED]
+        # linear_velocity: [-MAX_SPEED, MAX_SPEED], angular_velocity: [-MAX_SPEED, +MAX_SPEED]
         self.action_space = spaces.Box(
-            low=np.array([0, -MAX_SPEED], dtype=np.float32),
+            low=np.array([-MAX_SPEED, -MAX_SPEED], dtype=np.float32),
             high=np.array([MAX_SPEED, MAX_SPEED], dtype=np.float32),
         )
 
@@ -302,12 +302,12 @@ class RoombaRedBallEnv(gym.Env):
         # exactly, otherwise the algorithm expects values that never occur.
         #   low/high[0]  red_pixel_ratio:           0.0 (no red) .. 1.0 (full image red)
         #   low/high[1]  goal_horizontal_position: -1.0 (ball left edge) .. +1.0 (ball right edge)
-        #   low/high[2]  linear_velocity:           0.0 (stopped) .. MAX_SPEED (full forward)
+        #   low/high[2]  linear_velocity:          -MAX_SPEED (full reverse) .. MAX_SPEED (full forward)
         #   low/high[3]  angular_velocity:         -MAX_SPEED (full right) .. +MAX_SPEED (full left)
         #   low/high[4-11] proximity sensors ps0..ps7: 0.0 (nothing) .. 1.0 (touching)
         self.observation_space = spaces.Box(
             low=np.array(
-                [0.0, -1.0, 0.0, -MAX_SPEED] + [0.0] * 8,
+                [0.0, -1.0, -MAX_SPEED, -MAX_SPEED] + [0.0] * 8,
                 dtype=np.float32,
             ),
             high=np.array(
@@ -473,6 +473,34 @@ class RoombaRedBallEnv(gym.Env):
                 reward += centering_improvement * 2.0
             elif not ball_recently_visible:
                 reward -= 0.5
+                lin_norm = abs(linear_velocity) / MAX_SPEED
+                ang_norm = abs(angular_velocity) / MAX_SPEED
+                # Penalize moving fast while blind — encourages stopping to search.
+                reward -= 0.3 * lin_norm
+                # Spin bonus when blind, but only at low linear speed so the
+                # robot learns to rotate in place rather than arc at full throttle.
+                if lin_norm < 0.3:
+                    reward += 0.2 * ang_norm
+                else:
+                    reward += 0.05 * ang_norm
+
+            # --- Wall avoidance ---
+            # Teach the robot that walls exist. Without this, it wanders into
+            # walls and has no signal to escape (proximity sensors are observed
+            # but never rewarded/penalised in earlier phases).
+            sensor_max = float(np.max(self.current_proximities))
+            touching_ball = (
+                sensor_max > 0.9
+                and self.current_red_pixel_ratio >= 0.10
+                and ball_recently_visible
+            )
+            if not touching_ball:
+                # Gradient: the closer to a wall, the bigger the penalty
+                if self.current_red_pixel_ratio < 0.05:
+                    reward -= sensor_max * 0.3
+                # Hard crash penalty when pressed against a wall
+                if sensor_max > 0.9:
+                    reward -= 2.0
 
             # --- Goal: physical contact with the ball ---
             reached_goal = self.current_front_proximity >= PROXIMITY_GOAL_THRESHOLD and ball_recently_visible
@@ -533,7 +561,7 @@ import os
 
 def run_training(
     resume_path=None,
-    total_timesteps=70_000,
+    total_timesteps=200_000,
     output_path="following_red_ball_model_phase_1_1",
     device=None,
 ):
@@ -546,37 +574,20 @@ def run_training(
         print("GPU:", torch.cuda.get_device_name(0))
     print("SAC device:", device)
 
-    def _resolve(p):
-        if p is None:
-            return None
-        if os.path.exists(p):
-            return p
-        z = p + ".zip" if not p.endswith(".zip") else p
-        if os.path.exists(z):
-            return z
-        return None
-
-    resolved = _resolve(resume_path)
-    if resume_path and resolved is None:
-        raise FileNotFoundError(f"Checkpoint not found: {resume_path}")
-
-    if resolved:
-        print(f"Loading pretrained SAC from {resolved}")
-        model = SAC.load(resolved, env=environment, device=device, verbose=1)
-        model.learn(total_timesteps=total_timesteps, reset_num_timesteps=False)
+    default_ckpt = "following_red_ball_model"
+    ckpt = resume_path if resume_path else default_ckpt
+    if os.path.exists(ckpt):
+        resolved = ckpt
+    elif os.path.exists(ckpt + ".zip"):
+        resolved = ckpt + ".zip"
     else:
-        model = SAC(
-            "MlpPolicy",
-            environment,
-            device=device,
-            verbose=1,
-            learning_starts=1000,
-            batch_size=256,
-            gamma=0.99,
-            learning_rate=3e-4,
+        raise FileNotFoundError(
+            f"Checkpoint not found: {ckpt} (set resume_path or place {default_ckpt}.zip in the working directory)"
         )
-        model.learn(total_timesteps=total_timesteps, reset_num_timesteps=True)
 
+    print(f"Loading pretrained SAC from {resolved} …")
+    model = SAC.load(resolved, env=environment, device=device, verbose=1)
+    model.learn(total_timesteps=total_timesteps, reset_num_timesteps=False)
     model.save(output_path)
     print(f"Model saved to {output_path}.zip")
     return model

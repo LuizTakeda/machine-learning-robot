@@ -17,14 +17,61 @@ Reward:
     - Proximity bonus (physical closeness via front sensor)
     - Large bonus for reaching the goal (physical contact)
 """
+import os
+import platform
 import sys
-DESKTOP_SETUP = True
 
-if DESKTOP_SETUP == True:
-    sys.path.append(r'D:\Webots\lib\controller\python')
-else:
-    sys.path.append(r'C:\Program Files\Webots\lib\controller\python')
 
+def _prepend_webots_controller_python_path():
+    """So `import controller` works when the script is not started by Webots."""
+    sysname = platform.system()
+
+    if "WEBOTS_HOME" not in os.environ or not os.environ["WEBOTS_HOME"]:
+        if sysname == "Darwin":
+            default_bundle = "/Applications/Webots.app"
+            if os.path.isdir(default_bundle):
+                os.environ["WEBOTS_HOME"] = default_bundle
+        elif sysname == "Linux":
+            for candidate in ("/usr/local/webots",):
+                if os.path.isdir(candidate):
+                    os.environ["WEBOTS_HOME"] = candidate
+                    break
+
+    home = os.environ.get("WEBOTS_HOME") or ""
+    if sysname == "Darwin" and home.rstrip("/").endswith("/Contents"):
+        fixed = os.path.dirname(home.rstrip("/"))
+        if fixed.endswith(".app"):
+            os.environ["WEBOTS_HOME"] = fixed
+            home = fixed
+
+    candidates = []
+    if home:
+        if sysname == "Darwin":
+            candidates.append(os.path.join(home, "Contents", "lib", "controller", "python"))
+        else:
+            candidates.append(os.path.join(home, "lib", "controller", "python"))
+    if sysname == "Darwin":
+        candidates.append("/Applications/Webots.app/Contents/lib/controller/python")
+    elif sysname == "Windows":
+        candidates.append(r"D:\Webots\lib\controller\python")
+        candidates.append(r"C:\Program Files\Webots\lib\controller\python")
+    elif sysname == "Linux":
+        candidates.append("/usr/local/webots/lib/controller/python")
+
+    for path in candidates:
+        if path and os.path.isdir(path):
+            sys.path.insert(0, path)
+            return
+
+    tried = ", ".join(p for p in candidates if p) or "(none)"
+    raise ImportError(
+        "Webots Python API not found (expected a folder containing controller.py). "
+        f"Tried: {tried}. Install Webots or set WEBOTS_HOME to the install root "
+        '(on macOS use e.g. WEBOTS_HOME=/Applications/Webots.app, not ".../Contents").'
+    )
+
+
+_prepend_webots_controller_python_path()
 
 from controller import Supervisor, Motor, Camera, DistanceSensor
 import numpy as np
@@ -122,9 +169,9 @@ def convert_velocities_to_motor_speeds(linear_velocity, angular_velocity):
     left_speed = linear_velocity - angular_velocity * WHEEL_DISTANCE / 2.0
     right_speed = linear_velocity + angular_velocity * WHEEL_DISTANCE / 2.0
 
-    # Clamp to max motor speed (no reverse)
-    left_speed = np.clip(left_speed, 0, MAX_SPEED)
-    right_speed = np.clip(right_speed, 0, MAX_SPEED)
+    # Clamp to max motor speed
+    left_speed = np.clip(left_speed, -MAX_SPEED, MAX_SPEED)
+    right_speed = np.clip(right_speed, -MAX_SPEED, MAX_SPEED)
     return left_speed, right_speed
 
 
@@ -225,9 +272,9 @@ class RoombaRedBallEnv(gym.Env):
         super().__init__()
 
         # Action space: agent controls linear and angular velocity
-        # linear_velocity: [0, MAX_SPEED] (no reverse), angular_velocity: [-MAX_SPEED, +MAX_SPEED]
+        # linear_velocity: [-MAX_SPEED, MAX_SPEED], angular_velocity: [-MAX_SPEED, +MAX_SPEED]
         self.action_space = spaces.Box(
-            low=np.array([0, -MAX_SPEED], dtype=np.float32),
+            low=np.array([-MAX_SPEED, -MAX_SPEED], dtype=np.float32),
             high=np.array([MAX_SPEED, MAX_SPEED], dtype=np.float32),
         )
 
@@ -244,12 +291,12 @@ class RoombaRedBallEnv(gym.Env):
         # exactly, otherwise the algorithm expects values that never occur.
         #   low/high[0]  red_pixel_ratio:           0.0 (no red) .. 1.0 (full image red)
         #   low/high[1]  goal_horizontal_position: -1.0 (ball left edge) .. +1.0 (ball right edge)
-        #   low/high[2]  linear_velocity:           0.0 (stopped) .. MAX_SPEED (full forward)
+        #   low/high[2]  linear_velocity:          -MAX_SPEED (full reverse) .. MAX_SPEED (full forward)
         #   low/high[3]  angular_velocity:         -MAX_SPEED (full right) .. +MAX_SPEED (full left)
         #   low/high[4-11] proximity sensors ps0..ps7: 0.0 (nothing) .. 1.0 (touching)
         self.observation_space = spaces.Box(
             low=np.array(
-                [0.0, -1.0, 0.0, -MAX_SPEED] + [0.0] * 8,
+                [0.0, -1.0, -MAX_SPEED, -MAX_SPEED] + [0.0] * 8,
                 dtype=np.float32,
             ),
             high=np.array(
