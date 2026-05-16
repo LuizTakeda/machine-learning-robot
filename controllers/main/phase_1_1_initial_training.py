@@ -98,6 +98,10 @@ MAX_STEPS_PER_EPISODE = 3000     # max steps per episode
 # Physical contact threshold: front proximity sensor value > 0.95 means the robot
 # is essentially touching the ball. Much more realistic than a 95% pixel ratio.
 PROXIMITY_GOAL_THRESHOLD = 0.95  # normalized proximity sensor value (0.0 - 1.0)
+# Supervisor-based goal termination: e-puck radius + ball radius + margin.
+# IR proximity reading on the curved sphere is unreliable, so we use the
+# world distance to the GOAL node instead.
+GOAL_DISTANCE_THRESHOLD = 0.11
 # Much higher than phase 1: the ball is often out of frame until the robot turns.
 STEPS_WITHOUT_BALL_LIMIT = 4000   # steps without seeing the ball before truncation
 FRAME_SKIP = 5
@@ -152,6 +156,18 @@ right_motor.setVelocity(0.0)
 robot_node = robot.getFromDef('ROBOT')
 robot_translation_field = robot_node.getField('translation')
 robot_rotation_field = robot_node.getField('rotation')
+
+goal_node = robot.getFromDef('GOAL')
+goal_translation_field = goal_node.getField('translation')
+
+
+def distance_to_goal():
+    """Euclidean distance in the X-Y plane between the robot and the GOAL node."""
+    rp = robot_translation_field.getSFVec3f()
+    gp = goal_translation_field.getSFVec3f()
+    dx = rp[0] - gp[0]
+    dy = rp[1] - gp[1]
+    return float(np.sqrt(dx * dx + dy * dy))
 
 # --- Robot dimensions ---
 # Distance between e-puck wheels - needed for converting
@@ -327,6 +343,7 @@ class RoombaRedBallEnv(gym.Env):
         self.current_angular_velocity = 0.0    # current angular velocity
         self.current_front_proximity = 0.0     # normalized front proximity (ps0+ps7 mean, used for reward)
         self.current_proximities = np.zeros(8, dtype=np.float32)  # all 8 normalized proximity sensors
+        self.previous_dist_goal = 0.0          # previous-step world distance to GOAL (for potential reward)
 
         # --- Counters ---
         self.step_count = 0                    # steps in current episode
@@ -394,6 +411,8 @@ class RoombaRedBallEnv(gym.Env):
         self.current_angular_velocity = 0.0
         self.current_front_proximity = 0.0
         self.current_proximities = np.zeros(8, dtype=np.float32)
+        # Initialize potential-reward baseline so the first step's Δdist is 0.
+        self.previous_dist_goal = distance_to_goal()
         self.step_count = 0
         self.steps_without_red_ball = 0
         self.episode_total_reward = 0.0
@@ -436,15 +455,18 @@ class RoombaRedBallEnv(gym.Env):
             # --- Step penalty ---
             reward -= 0.05
 
-            # --- Visibility reward ---
-            # Small absolute reward for seeing the ball — gives gradient for exploration.
-            # At start position red_px ~ 0.004, so reward ~ 0.012, well below step penalty.
-            reward += self.current_red_pixel_ratio * 3.0
-
             # --- Delta reward ---
             # Rewards getting CLOSER to the ball, penalizes moving away.
             pixel_ratio_change = self.current_red_pixel_ratio - self.previous_red_pixel_ratio
             reward += pixel_ratio_change * 10.0
+
+            # --- Distance potential reward ---
+            # Supervisor-based shaping: rewards Euclidean approach to the GOAL node.
+            # Telescopes over the episode (sum = K * (start_dist - end_dist)), so it
+            # cannot be farmed by oscillation. Works even when the ball is out of frame.
+            current_dist_goal = distance_to_goal()
+            reward += (self.previous_dist_goal - current_dist_goal) * 5.0
+            self.previous_dist_goal = current_dist_goal
 
             # Track ball visibility (two levels):
             #   ball_is_in_front  — visible AND centered (for centering delta)
@@ -489,33 +511,30 @@ class RoombaRedBallEnv(gym.Env):
             # walls and has no signal to escape (proximity sensors are observed
             # but never rewarded/penalised in earlier phases).
             sensor_max = float(np.max(self.current_proximities))
-            touching_ball = (
-                sensor_max > 0.9
-                and self.current_red_pixel_ratio >= 0.10
-                and ball_recently_visible
-            )
+            dist_goal = distance_to_goal()
+            touching_ball = dist_goal < GOAL_DISTANCE_THRESHOLD
             if not touching_ball:
                 # Gradient: the closer to a wall, the bigger the penalty
                 if self.current_red_pixel_ratio < 0.05:
                     reward -= sensor_max * 0.3
-                # Hard crash penalty when pressed against a wall
-                if sensor_max > 0.9:
+                # Hard crash penalty when pressed against a wall.
+                # Gated by red: high red + high prox = the ball, not a wall.
+                if sensor_max > 0.9 and self.current_red_pixel_ratio < 0.15:
                     reward -= 2.0
 
-            # --- Goal: physical contact with the ball ---
-            reached_goal = self.current_front_proximity >= PROXIMITY_GOAL_THRESHOLD and ball_recently_visible
-            if self.current_front_proximity > 0.5:
+            # --- Goal: supervisor-based world distance to the GOAL node ---
+            reached_goal = touching_ball
+            if self.current_front_proximity > 0.5 or dist_goal < 0.2:
                 print(
                     f"  [GOAL DEBUG] step={self.step_count}"
+                    f" dist={dist_goal:.3f}"
                     f" proximity={self.current_front_proximity:.3f}"
                     f" red_px={self.current_red_pixel_ratio:.4f}"
-                    f" steps_since_visible={self.steps_since_ball_visible}"
-                    f" ball_recently_visible={ball_recently_visible}"
                     f" reached_goal={reached_goal}"
                 )
             if reached_goal:
                 reward += 100.0
-                print(f"*** GOAL REACHED at step {self.step_count}! proximity={self.current_front_proximity:.3f} ***")
+                print(f"*** GOAL REACHED at step {self.step_count}! dist={dist_goal:.3f} ***")
                 terminated = True
 
             accumulated_reward += reward
@@ -553,10 +572,15 @@ class RoombaRedBallEnv(gym.Env):
 # =============================================
 # TRAINING
 # =============================================
-environment = RoombaRedBallEnv()
+from stable_baselines3.common.monitor import Monitor
+
+environment = Monitor(RoombaRedBallEnv())
 
 from stable_baselines3 import SAC
 import os
+
+TB_LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tb_logs")
+TB_LOG_NAME = "phase_1_1"
 
 
 def run_training(
@@ -587,7 +611,13 @@ def run_training(
 
     print(f"Loading pretrained SAC from {resolved} …")
     model = SAC.load(resolved, env=environment, device=device, verbose=1)
-    model.learn(total_timesteps=total_timesteps, reset_num_timesteps=False)
+    os.makedirs(TB_LOG_DIR, exist_ok=True)
+    model.tensorboard_log = TB_LOG_DIR
+    model.learn(
+        total_timesteps=total_timesteps,
+        reset_num_timesteps=False,
+        tb_log_name=TB_LOG_NAME,
+    )
     model.save(output_path)
     print(f"Model saved to {output_path}.zip")
     return model

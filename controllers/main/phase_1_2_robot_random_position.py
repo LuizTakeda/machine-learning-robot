@@ -95,6 +95,9 @@ RED_SMALL_FOR_WALL_GRADIENT = 0.05
 WALL_PROX_GRADIENT_SCALE = 0.3
 WALL_CRASH_PENALTY = 2.0
 TOUCHING_BALL_RED_MIN = 0.10
+# Supervisor-based goal termination: e-puck radius + ball radius + margin.
+# IR proximity reading on the curved sphere is unreliable.
+GOAL_DISTANCE_THRESHOLD = 0.11
 SPIN_WHEN_WEDGED_K = 0.12
 WEDGED_SENSOR_MAX = 0.35
 WEDGED_RED_MAX = 0.05
@@ -186,6 +189,15 @@ goal_translation_field = goal_node.getField('translation')
 _g0 = goal_translation_field.getSFVec3f()
 GOAL_PLANE_X = float(_g0[0])
 GOAL_PLANE_Y = float(_g0[1])
+
+
+def distance_to_goal():
+    """Euclidean distance in the X-Y plane between the robot and the GOAL node."""
+    rp = robot_translation_field.getSFVec3f()
+    gp = goal_translation_field.getSFVec3f()
+    dx = rp[0] - gp[0]
+    dy = rp[1] - gp[1]
+    return float(np.sqrt(dx * dx + dy * dy))
 
 # --- Robot dimensions ---
 # Distance between e-puck wheels - needed for converting
@@ -556,11 +568,8 @@ class RoombaRedBallEnv(gym.Env):
                 self.steps_near_ball = 0
 
             in_contact = sensor_max > WALL_CONTACT_SENSOR_MAX
-            touching_ball = (
-                in_contact
-                and self.current_red_pixel_ratio >= TOUCHING_BALL_RED_MIN
-                and ball_recently_visible
-            )
+            dist_goal = distance_to_goal()
+            touching_ball = dist_goal < GOAL_DISTANCE_THRESHOLD
             touching_wall = in_contact and not touching_ball
 
             # Direction-agnostic: |linear_velocity| so reverse motion is penalized
@@ -634,18 +643,16 @@ class RoombaRedBallEnv(gym.Env):
             # --- Goal: physical contact with the ball (same termination as phase 2) ---
             if touching_ball:
                 reward += 1000.0
-                print(f"*** GOAL REACHED at step {self.step_count}! proximity={self.current_front_proximity:.3f} ***")
+                print(f"*** GOAL REACHED at step {self.step_count}! dist={dist_goal:.3f} ***")
                 left_motor.setVelocity(0.0)
                 right_motor.setVelocity(0.0)
                 terminated = True
-            elif self.current_front_proximity > 0.5:
+            elif self.current_front_proximity > 0.5 or dist_goal < 0.2:
                 print(
                     f"  [GOAL DEBUG] step={self.step_count}"
+                    f" dist={dist_goal:.3f}"
                     f" proximity={self.current_front_proximity:.3f}"
                     f" red_px={self.current_red_pixel_ratio:.4f}"
-                    f" steps_since_visible={self.steps_since_ball_visible}"
-                    f" ball_recently_visible={ball_recently_visible}"
-                    f" touching_ball={touching_ball}"
                     f" prox_max={sensor_max:.2f}"
                     f" wall_streak={self.steps_touching_wall}"
                     f" blind_wall={self.steps_blind_near_wall}"
@@ -701,10 +708,15 @@ class RoombaRedBallEnv(gym.Env):
 # =============================================
 # TRAINING
 # =============================================
-environment = RoombaRedBallEnv()
+from stable_baselines3.common.monitor import Monitor
+
+environment = Monitor(RoombaRedBallEnv())
 
 from stable_baselines3 import SAC
 import os
+
+TB_LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tb_logs")
+TB_LOG_NAME = "phase_1_2"
 
 
 def run_training(
@@ -738,7 +750,13 @@ def run_training(
 
     print(f"Loading pretrained SAC from {resolved} …")
     model = SAC.load(resolved, env=environment, device=device, verbose=1)
-    model.learn(total_timesteps=total_timesteps, reset_num_timesteps=False)
+    os.makedirs(TB_LOG_DIR, exist_ok=True)
+    model.tensorboard_log = TB_LOG_DIR
+    model.learn(
+        total_timesteps=total_timesteps,
+        reset_num_timesteps=False,
+        tb_log_name=TB_LOG_NAME,
+    )
     model.save(output_path)
     print(f"Model saved to {output_path}.zip")
     return model

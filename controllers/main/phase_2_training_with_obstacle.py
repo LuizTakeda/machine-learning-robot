@@ -145,6 +145,20 @@ robot_translation_field = robot_node.getField('translation')
 robot_rotation_field = robot_node.getField('rotation')
 
 goal_node = robot.getFromDef('GOAL')
+goal_translation_field = goal_node.getField('translation')
+
+
+def distance_to_goal():
+    """Euclidean distance in the X-Y plane between the robot and the GOAL node."""
+    rp = robot_translation_field.getSFVec3f()
+    gp = goal_translation_field.getSFVec3f()
+    dx = rp[0] - gp[0]
+    dy = rp[1] - gp[1]
+    return float(np.sqrt(dx * dx + dy * dy))
+
+
+# Supervisor-based goal termination: e-puck radius + ball radius + margin.
+GOAL_DISTANCE_THRESHOLD = 0.11
 
 # --- Robot dimensions ---
 # Distance between e-puck wheels - needed for converting
@@ -471,11 +485,8 @@ class RoombaRedBallEnv(gym.Env):
             # at distance has ball_recently_visible=True but red_pixel_ratio is small.
             sensor_max = np.max(self.current_proximities)
             in_contact = sensor_max > 0.9
-            touching_ball = (
-                in_contact
-                and self.current_red_pixel_ratio >= 0.10
-                and ball_recently_visible
-            )
+            dist_goal = distance_to_goal()
+            touching_ball = dist_goal < GOAL_DISTANCE_THRESHOLD
             touching_wall = in_contact and not touching_ball
 
             # --- Smooth wall avoidance gradient ---
@@ -495,10 +506,10 @@ class RoombaRedBallEnv(gym.Env):
             else:
                 self.steps_touching_wall = 0
 
-            # --- Goal: physical contact with the ball ---
+            # --- Goal: supervisor-based world distance to the GOAL node ---
             if touching_ball:
                 reward += 1000.0
-                print(f"*** GOAL REACHED at step {self.step_count}! proximity={self.current_front_proximity:.3f} ***")
+                print(f"*** GOAL REACHED at step {self.step_count}! dist={dist_goal:.3f} ***")
                 terminated = True
 
             accumulated_reward += reward
@@ -549,9 +560,14 @@ class RoombaRedBallEnv(gym.Env):
 # =============================================
 # TRAINING
 # =============================================
-environment = RoombaRedBallEnv()
+from stable_baselines3.common.monitor import Monitor
+
+environment = Monitor(RoombaRedBallEnv())
 
 from stable_baselines3 import SAC
+
+TB_LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tb_logs")
+TB_LOG_NAME = "phase_2"
 
 
 def run_training(
@@ -629,7 +645,13 @@ def run_training(
         if not loaded:
             print("No replay buffer file found; learning from an empty buffer.")
 
-    model.learn(total_timesteps=total_timesteps, reset_num_timesteps=False)
+    os.makedirs(TB_LOG_DIR, exist_ok=True)
+    model.tensorboard_log = TB_LOG_DIR
+    model.learn(
+        total_timesteps=total_timesteps,
+        reset_num_timesteps=False,
+        tb_log_name=TB_LOG_NAME,
+    )
     model.save(output_path)
     model.save_replay_buffer(replay_buffer_save_path)
     print(f"Model saved to {output_path}.zip")
