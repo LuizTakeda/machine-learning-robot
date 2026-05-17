@@ -5,9 +5,9 @@ sceneTreePerspectives: 000000ff000000010000000300000026000000c0000000fa010000000
 maximizedDockId: -1
 centralWidgetVisible: 1
 projectionMode: PERSPECTIVE
-renderingMode: WIREFRAME
+renderingMode: PLAIN
 orthographicViewHeight: 2.59374
 textFiles: -1
 globalOptionalRendering: CameraFrustums
 consoles: Console:All:All
-renderingDevicePerspectives: e-puck:camera;1;18.5641;0.0187557;0.0488633
+renderingDevicePerspectives: e-puck:camera;1;10.083;0.00648576;0.0850995

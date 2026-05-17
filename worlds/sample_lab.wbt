@@ -16,8 +16,8 @@ WorldInfo {
   title "E-puck simulation"
 }
 Viewpoint {
-  orientation 0.02383232911731603 -0.9984723730830181 -0.04984917530722302 5.389945269711999
-  position -2.7504781105696585 -0.015980926303612364 3.5835000892152196
+  orientation -0.008009313483833175 -0.9998837591797927 0.012973782255145866 5.177281976412616
+  position -2.1784606678732916 -0.29190831195762307 4.977616295057726
   follow "e-puck"
 }
 TexturedBackground {
@@ -34,8 +34,18 @@ RectangleArena {
   }
 }
 DEF ROBOT E-puck {
-  translation -0.839927 0.0242603 0.00467416
-  rotation -0.13350004132414323 -0.32651610107111567 -0.9357162896454081 0.171991
+  hidden position_0_0 -7189.127713664909
+  hidden position_0_1 -6309.52329099252
+  hidden linearVelocity_0 1.4781875705693892e-08 -8.391205412294767e-08 -6.450997602769349e-09
+  hidden angularVelocity_0 2.180056407540378e-07 -6.864363513134847e-08 1.9921406479022194e-06
+  hidden rotation_1 0 -1 0 2.3940145395864345
+  hidden linearVelocity_1 6.537530364466188e-08 -9.669957807787289e-08 -1.1757584591336337e-08
+  hidden angularVelocity_1 -8.550231006618265e-05 4.8151711350914805 0.0015549542180566254
+  hidden rotation_2 0 1 0 4.33219060264032
+  hidden linearVelocity_2 -3.5710214618891765e-08 -7.627778070491654e-08 -5.001200231665328e-10
+  hidden angularVelocity_2 -8.412942012335708e-05 4.753830066187821 0.0015351224535853616
+  translation -0.6684506719146058 -0.01023706122722801 -3.8533853747987554e-05
+  rotation -0.0022184240731165077 -0.00016127960417773598 0.9999975262887011 -3.141575520466588
   controller "<extern>"
   supervisor TRUE
 }
@@ -60,32 +70,26 @@ DEF GOAL Solid {
   locked TRUE
 }
 DEF CUBE WoodenBox {
-  translation -0.54 0.91 0.075
+  translation -0.54 0.23 0.075
   size 0.15 0.15 0.15
 }
 DEF CUBE WoodenBox {
-  translation -0.09 1.05 0.075
+  translation -0.31 -0.41 0.075
   name "wooden box(3)"
   size 0.15 0.15 0.15
 }
 DEF CUBE WoodenBox {
-  translation -0.09 -1.18 0.075
+  translation -0.56 0.08 0.075
   name "wooden box(5)"
   size 0.15 0.15 0.15
 }
 DEF CUBE WoodenBox {
-  translation -0.54 -0.89 0.075
+  translation -0.54 -0.06 0.075
   name "wooden box(1)"
   size 0.15 0.15 0.15
 }
 DEF WALL1 Wall {
   translation 2.71816e-06 -0.99 0
   rotation 0 0 1 1.5708
-  size 0.02 1 0.1
-}
-DEF WALL2 Wall {
-  translation 4.26093e-06 -0.91 0
-  rotation 0 0 1 1.5708
-  name "wall(5)"
   size 0.02 1 0.1
 }
